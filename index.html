@@ -15,7 +15,9 @@
 <style>
   html, body { margin: 0; padding: 0; background: #12141A; }
   * { box-sizing: border-box; }
-  input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -33,6 +35,7 @@ const T = {
   positive: '#3ED9A0', negative: '#FF6B6E',
   meta: '#7C8CFF', metaDim: 'rgba(124,140,255,0.14)',
   pin: '#E0245E', pinDim: 'rgba(224,36,94,0.14)',
+  orders: '#3ED9A0', ordersDim: 'rgba(62,217,160,0.14)',
   paprika: '#E8622C',
 };
 const fontDisplay = "'Space Grotesk','Segoe UI',system-ui,sans-serif";
@@ -41,13 +44,15 @@ const fontMono = "'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 function fmtEur(n,d=2){ if(!isFinite(n)) n=0; const s=Math.abs(n).toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return (n<0?'-':'')+'€'+s; }
+function fmtKc(n,d=2){ if(!isFinite(n)) n=0; const s=n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return s+' Kč'; }
 function fmtPct(n,d=1){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d})+'%'; }
 function fmtNum(n,d=0){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 
 const storage = {
   get(key){ try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch(e){ return null; } },
-  set(key, val){ try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch(e){ return false; } }
+  set(key, val){ try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch(e){ return false; } },
+  remove(key){ try { localStorage.removeItem(key); } catch(e){} }
 };
 
 const inputStyle = { background: T.surfaceAlt, border: '1px solid '+T.border, borderRadius: 6, color: T.text, fontFamily: fontMono, fontSize: 13, padding: '6px 8px', outline: 'none', width: '100%' };
@@ -88,6 +93,8 @@ function AddBtn({onClick, label, accent}){
   </button>);
 }
 
+// ---------- META TAB (CZK) ----------
+
 function MetaTab({data, setData}){
   const {settings, rows} = data;
   const beroas = useMemo(()=>{ const net = settings.price - settings.fulfillCost - settings.otherFees; return net>0 ? settings.price/net : 0; },[settings]);
@@ -118,19 +125,19 @@ function MetaTab({data, setData}){
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Ekonomika produktu</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:14}}>
-        <Field label="Cena produktu (€)"><input style={inputStyle} type="number" step="0.01" value={settings.price} onChange={e=>updateSettings('price',parseFloat(e.target.value)||0)} /></Field>
-        <Field label="Fulfill náklady (€)"><input style={inputStyle} type="number" step="0.01" value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',parseFloat(e.target.value)||0)} /></Field>
-        <Field label="Ostatní poplatky (€)"><input style={inputStyle} type="number" step="0.01" value={settings.otherFees} onChange={e=>updateSettings('otherFees',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Cena produktu (Kč)"><input style={inputStyle} type="number" step="1" value={settings.price} onChange={e=>updateSettings('price',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Fulfill náklady (Kč)"><input style={inputStyle} type="number" step="1" value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Ostatní poplatky (Kč)"><input style={inputStyle} type="number" step="1" value={settings.otherFees} onChange={e=>updateSettings('otherFees',parseFloat(e.target.value)||0)} /></Field>
         <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600}}>{beroas.toFixed(2)}</div></Field>
       </div>
     </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
-      <MetricCard label="Total profit" value={fmtEur(totals.totalProfit)} tone={totals.totalProfit>=0?'positive':'negative'} />
-      <MetricCard label="Total revenue" value={fmtEur(totals.totalRevenue)} />
-      <MetricCard label="Total ad spend" value={fmtEur(totals.totalSpend)} />
+      <MetricCard label="Total profit" value={fmtKc(totals.totalProfit)} tone={totals.totalProfit>=0?'positive':'negative'} />
+      <MetricCard label="Total revenue" value={fmtKc(totals.totalRevenue)} />
+      <MetricCard label="Total ad spend" value={fmtKc(totals.totalSpend)} />
       <MetricCard label="Blended ROAS" value={totals.blendedRoas.toFixed(2)} sub={"Break-even: "+beroas.toFixed(2)} tone={totals.blendedRoas>=beroas?'positive':'negative'} />
       <MetricCard label="Profit margin" value={fmtPct(totals.marginPct)} />
-      <MetricCard label="Ø denní profit" value={fmtEur(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
+      <MetricCard label="Ø denní profit" value={fmtKc(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
       <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
@@ -145,12 +152,12 @@ function MetaTab({data, setData}){
             <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={{...inputStyle,width:130}} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" style={{...inputStyle,width:60,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',parseFloat(e.target.value)||0)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:80,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',parseFloat(e.target.value)||0)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.revenue)}</td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.fulfill)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="1" style={{...inputStyle,width:80,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.revenue)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.fulfill)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
                 <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
-                <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtEur(r.profit)}</span>
+                <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtKc(r.profit)}</span>
               </td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=beroas?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
@@ -162,6 +169,8 @@ function MetaTab({data, setData}){
     <div style={{marginTop:14}}><AddBtn onClick={addRow} label="Přidat den" accent={T.meta} /></div>
   </div>);
 }
+
+// ---------- PINTEREST TAB (EUR) ----------
 
 function PinterestTab({data, setData}){
   const {settings, rows} = data;
@@ -250,49 +259,181 @@ function PinterestTab({data, setData}){
   </div>);
 }
 
-const DEFAULT_META = { settings:{price:799, fulfillCost:300, otherFees:20}, rows:[] };
-const DEFAULT_PIN = { settings:{margin:62}, rows:[] };
+// ---------- ORDERS TAB (per-order profit calculator, Kč) ----------
 
-function App(){
-  const [tab,setTab] = useState('meta');
-  const [metaData,setMetaData] = useState(()=> storage.get('meta:data') || DEFAULT_META);
-  const [pinData,setPinData] = useState(()=> storage.get('pinterest:data') || DEFAULT_PIN);
-  const [saveState,setSaveState] = useState('idle');
+function OrdersTab({data, setData}){
+  const {settings, rows} = data;
+  const computedRows = useMemo(()=>rows.map(r=>{
+    const result = r.earnedEur*settings.kurzEur - r.paidUsd*settings.kurzUsd;
+    return {...r, result};
+  }),[rows,settings]);
+  const totals = useMemo(()=>{
+    const totalResult = computedRows.reduce((s,r)=>s+r.result,0);
+    const totalPaid = computedRows.reduce((s,r)=>s+r.paidUsd,0);
+    const totalEarned = computedRows.reduce((s,r)=>s+r.earnedEur,0);
+    return { totalResult, totalPaid, totalEarned, count: computedRows.length };
+  },[computedRows]);
+  const maxAbsResult = Math.max(1, ...computedRows.map(r=>Math.abs(r.result)));
+  const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
+  const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),orderNumber:'#'+(1000+d.rows.length+1),paidUsd:0,earnedEur:0}]}));
+  const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
+
+  return (<div>
+    <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Kurzy</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:14,maxWidth:400}}>
+        <Field label="Kurz EUR → CZK"><input style={inputStyle} type="number" step="0.01" value={settings.kurzEur} onChange={e=>updateSettings('kurzEur',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Kurz USD → CZK"><input style={inputStyle} type="number" step="0.01" value={settings.kurzUsd} onChange={e=>updateSettings('kurzUsd',parseFloat(e.target.value)||0)} /></Field>
+      </div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
+      <MetricCard label="Celkový výsledek" value={fmtKc(totals.totalResult)} tone={totals.totalResult>=0?'positive':'negative'} />
+      <MetricCard label="Celkem vyděláno (EUR)" value={fmtEur(totals.totalEarned)} />
+      <MetricCard label="Celkem zaplaceno (USD)" value={'$'+fmtNum(totals.totalPaid,2)} />
+      <MetricCard label="Počet objednávek" value={fmtNum(totals.count)} />
+    </div>
+    <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+        <thead><tr style={{background:T.surface}}>
+          {['Objednávka','Zaplaceno (nákup, $)','Vydělal (€)','Výsledek (Kč)',''].map((h,i)=>(
+            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
+          ))}
+        </tr></thead>
+        <tbody>
+          {computedRows.length===0 && <tr><td colSpan={5} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádné objednávky. Přidej první.</td></tr>}
+          {computedRows.map((r,i)=>(
+            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="text" style={{...inputStyle,width:90}} value={r.orderNumber} onChange={e=>updateRow(r.id,'orderNumber',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:100,textAlign:'right'}} value={r.paidUsd} onChange={e=>updateRow(r.id,'paidUsd',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:100,textAlign:'right'}} value={r.earnedEur} onChange={e=>updateRow(r.id,'earnedEur',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
+                <DataBar value={r.result} max={maxAbsResult} positive={r.result>=0} />
+                <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.result>=0?T.positive:T.negative}}>{fmtKc(r.result)}</span>
+              </td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <div style={{marginTop:14}}><AddBtn onClick={addRow} label="Přidat objednávku" accent={T.orders} /></div>
+  </div>);
+}
+
+// ---------- STORE PICKER ----------
+
+function StorePicker({stores, onSelect, onCreate, onDelete}){
+  const [name, setName] = useState('');
+  return (<div style={{background:T.bg,minHeight:'100vh',padding:'60px 20px',fontFamily:fontBody,color:T.text}}>
+    <div style={{maxWidth:520,margin:'0 auto'}}>
+      <div style={{fontFamily:fontDisplay,fontWeight:700,fontSize:28,letterSpacing:'-0.02em',marginBottom:6,textAlign:'center'}}>PROFITOMAT</div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:36,textAlign:'center'}}>Vyber obchod, který chceš sledovat</div>
+
+      <div style={{display:'flex',flexDirection:'column',gap:10,marginBottom:28}}>
+        {stores.map(s=>(
+          <div key={s.id} style={{display:'flex',alignItems:'center',gap:8}}>
+            <button onClick={()=>onSelect(s.id)} style={{flex:1,textAlign:'left',background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'14px 16px',color:T.text,fontFamily:fontDisplay,fontWeight:600,fontSize:15,cursor:'pointer'}}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=T.paprika;}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;}}>
+              {s.name}
+            </button>
+            <IconBtn onClick={()=>onDelete(s.id)} title="Smazat obchod" danger>✕</IconBtn>
+          </div>
+        ))}
+        {stores.length===0 && <div style={{color:T.textFaint,fontSize:13,textAlign:'center',padding:'12px 0'}}>Zatím žádný obchod. Přidej první níže.</div>}
+      </div>
+
+      <div style={{display:'flex',gap:8}}>
+        <input style={{...inputStyle,fontFamily:fontBody}} type="text" placeholder="Název obchodu, např. Manos Cálida" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter' && name.trim()){ onCreate(name.trim()); setName(''); } }} />
+        <button onClick={()=>{ if(name.trim()){ onCreate(name.trim()); setName(''); } }} style={{background:T.paprika,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'0 18px',cursor:'pointer'}}>Přidat</button>
+      </div>
+    </div>
+  </div>);
+}
+
+// ---------- WORKSPACE (per-store) ----------
+
+const DEFAULT_META = { settings: { price: 999, fulfillCost: 300, otherFees: 20 }, rows: [] };
+const DEFAULT_PIN = { settings: { margin: 62 }, rows: [] };
+const DEFAULT_ORDERS = { settings: { kurzEur: 24.2, kurzUsd: 21 }, rows: [] };
+
+function Workspace({storeId, storeName, onBack}){
+  const [tab, setTab] = useState('meta');
+  const [metaData, setMetaData] = useState(()=> storage.get('store:'+storeId+':meta') || DEFAULT_META);
+  const [pinData, setPinData] = useState(()=> storage.get('store:'+storeId+':pinterest') || DEFAULT_PIN);
+  const [ordersData, setOrdersData] = useState(()=> storage.get('store:'+storeId+':orders') || DEFAULT_ORDERS);
+  const [saveState, setSaveState] = useState('idle');
   const saveTimer = useRef(null);
 
   useEffect(()=>{
     setSaveState('saving');
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(()=>{
-      const ok1 = storage.set('meta:data', metaData);
-      const ok2 = storage.set('pinterest:data', pinData);
-      setSaveState(ok1 && ok2 ? 'saved' : 'error');
+      const ok1 = storage.set('store:'+storeId+':meta', metaData);
+      const ok2 = storage.set('store:'+storeId+':pinterest', pinData);
+      const ok3 = storage.set('store:'+storeId+':orders', ordersData);
+      setSaveState(ok1 && ok2 && ok3 ? 'saved' : 'error');
     }, 400);
     return ()=>clearTimeout(saveTimer.current);
-  },[metaData, pinData]);
+  },[metaData, pinData, ordersData, storeId]);
+
+  const tabs = [
+    {id:'meta', label:'META ADS', color:T.meta, dim:T.metaDim},
+    {id:'pinterest', label:'PINTEREST ADS', color:T.pin, dim:T.pinDim},
+    {id:'orders', label:'OBJEDNÁVKY', color:T.orders, dim:T.ordersDim},
+  ];
 
   return (<div style={{background:T.bg,minHeight:'100vh',padding:'28px 16px 60px',fontFamily:fontBody,color:T.text}}>
     <div style={{maxWidth:1200,margin:'0 auto'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:24,flexWrap:'wrap',gap:12}}>
         <div>
+          <button onClick={onBack} style={{background:'transparent',border:'none',color:T.textFaint,fontFamily:fontBody,fontSize:12,cursor:'pointer',padding:0,marginBottom:6}}>← Obchody</button>
           <div style={{fontFamily:fontDisplay,fontWeight:700,fontSize:26,letterSpacing:'-0.02em'}}>PROFITOMAT</div>
-          <div style={{fontSize:13,color:T.textMuted,marginTop:2}}>Denní přehled výkonu kampaní · Manos Cálida</div>
+          <div style={{fontSize:13,color:T.textMuted,marginTop:2}}>Denní přehled výkonu kampaní · {storeName}</div>
         </div>
         <div style={{fontSize:11,color:T.textFaint,fontFamily:fontMono}}>
-          {saveState==='saving'?'ukládám…':saveState==='saved'?'uloženo v telefonu/PC':saveState==='error'?'chyba ukládání':''}
+          {saveState==='saving'?'ukládám…':saveState==='saved'?'uloženo v tomto zařízení':saveState==='error'?'chyba ukládání':''}
         </div>
       </div>
-      <div style={{display:'flex',gap:4,marginBottom:22,background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:4,width:'fit-content'}}>
-        <button onClick={()=>setTab('meta')} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',borderRadius:7,border:'none',cursor:'pointer',background:tab==='meta'?T.metaDim:'transparent',color:tab==='meta'?T.meta:T.textMuted,fontFamily:fontDisplay,fontWeight:600,fontSize:13}}>
-          <span style={{width:7,height:7,borderRadius:'50%',background:T.meta}} /> META ADS
-        </button>
-        <button onClick={()=>setTab('pinterest')} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',borderRadius:7,border:'none',cursor:'pointer',background:tab==='pinterest'?T.pinDim:'transparent',color:tab==='pinterest'?T.pin:T.textMuted,fontFamily:fontDisplay,fontWeight:600,fontSize:13}}>
-          <span style={{width:7,height:7,borderRadius:'50%',background:T.pin}} /> PINTEREST ADS
-        </button>
+      <div style={{display:'flex',gap:4,marginBottom:22,background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:4,width:'fit-content',flexWrap:'wrap'}}>
+        {tabs.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',borderRadius:7,border:'none',cursor:'pointer',background:tab===t.id?t.dim:'transparent',color:tab===t.id?t.color:T.textMuted,fontFamily:fontDisplay,fontWeight:600,fontSize:13}}>
+            <span style={{width:7,height:7,borderRadius:'50%',background:t.color}} /> {t.label}
+          </button>
+        ))}
       </div>
-      {tab==='meta' ? <MetaTab data={metaData} setData={setMetaData} /> : <PinterestTab data={pinData} setData={setPinData} />}
+      {tab==='meta' && <MetaTab data={metaData} setData={setMetaData} />}
+      {tab==='pinterest' && <PinterestTab data={pinData} setData={setPinData} />}
+      {tab==='orders' && <OrdersTab data={ordersData} setData={setOrdersData} />}
     </div>
   </div>);
+}
+
+// ---------- APP ----------
+
+function App(){
+  const [stores, setStores] = useState(()=> storage.get('stores:list') || []);
+  const [currentStoreId, setCurrentStoreId] = useState(null);
+
+  const persistStores = (list) => { setStores(list); storage.set('stores:list', list); };
+  const handleCreate = (name) => {
+    const s = { id: uid(), name };
+    persistStores([...stores, s]);
+  };
+  const handleDelete = (id) => {
+    persistStores(stores.filter(s=>s.id!==id));
+    storage.remove('store:'+id+':meta');
+    storage.remove('store:'+id+':pinterest');
+    storage.remove('store:'+id+':orders');
+    if (currentStoreId===id) setCurrentStoreId(null);
+  };
+
+  if (!currentStoreId) {
+    return <StorePicker stores={stores} onSelect={setCurrentStoreId} onCreate={handleCreate} onDelete={handleDelete} />;
+  }
+  const store = stores.find(s=>s.id===currentStoreId);
+  return <Workspace key={currentStoreId} storeId={currentStoreId} storeName={store ? store.name : ''} onBack={()=>setCurrentStoreId(null)} />;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
