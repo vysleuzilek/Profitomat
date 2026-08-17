@@ -6,8 +6,8 @@
 <title>Profitomat</title>
 <meta name="theme-color" content="#12141A" />
 <link rel="manifest" href="manifest.json" />
-<link rel="icon" href="icon-192.png" />
-<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png?v=2" />
+<link rel="apple-touch-icon" href="icon-192.png?v=2" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -137,6 +137,85 @@ function AddBtn({onClick, label, accent}){
   </button>);
 }
 
+// ---------- SHARED: chart icon, calendar icon, toggle button ----------
+
+function IconChart(){ return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="12" width="4" height="9" rx="1" fill="currentColor"/><rect x="10" y="7" width="4" height="14" rx="1" fill="currentColor"/><rect x="17" y="3" width="4" height="18" rx="1" fill="currentColor"/></svg>); }
+function IconCalendar(){ return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="3" y1="10" x2="21" y2="10"/></svg>); }
+
+function ToolbarToggle({label, icon, active, onClick, accent}){
+  return (<button onClick={onClick} style={{display:'flex',alignItems:'center',gap:6,background:active?accent+'22':'transparent',border:'1px solid '+(active?accent:T.border),borderRadius:8,color:active?accent:T.textMuted,fontFamily:fontBody,fontSize:12,padding:'6px 10px',cursor:'pointer'}}>
+    {icon}{label}
+  </button>);
+}
+
+// ---------- SHARED: profit trend chart (bar chart, colored by sign) ----------
+
+function ProfitChart({rows, fmt}){
+  const data = rows.filter(r=>r.date).slice().sort((a,b)=>a.date.localeCompare(b.date)).slice(-30);
+  if (data.length < 2) {
+    return <div style={{padding:'20px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Nedostatek dat pro graf – přidej aspoň 2 dny.</div>;
+  }
+  const W = 600, H = 170, padX = 6;
+  const values = data.map(r=>r.profit);
+  const maxVal = Math.max(0, ...values);
+  const minVal = Math.min(0, ...values);
+  const range = (maxVal - minVal) || 1;
+  const baselineY = H - ((0-minVal)/range)*H;
+  const n = data.length;
+  const slot = (W - padX*2) / n;
+  const barW = Math.max(2, slot*0.55);
+  return (<svg viewBox={'0 0 '+W+' '+H} style={{width:'100%',height:170,display:'block'}} preserveAspectRatio="none">
+    <line x1={0} y1={baselineY} x2={W} y2={baselineY} stroke={T.borderSoft} strokeWidth="1" />
+    {data.map((r,i)=>{
+      const val = r.profit;
+      const y = H - ((val-minVal)/range)*H;
+      const barTop = val>=0 ? y : baselineY;
+      const barH = Math.max(1, Math.abs(y-baselineY));
+      const x = padX + i*slot + (slot-barW)/2;
+      return (<rect key={i} x={x} y={barTop} width={barW} height={barH} rx={Math.min(3,barW/3)} fill={val>=0?T.positive:T.negative} opacity={0.9}>
+        <title>{r.date+' — '+fmt(val)}</title>
+      </rect>);
+    })}
+  </svg>);
+}
+
+// ---------- SHARED: weekly / monthly profit summary ----------
+
+function weekStartKey(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  const day = (d.getDay()+6)%7;
+  d.setDate(d.getDate()-day);
+  return d.toISOString().slice(0,10);
+}
+function fmtDateCz(iso){ const parts = iso.split('-'); return parts[2]+'.'+parts[1]+'.'; }
+
+function PeriodSummary({rows, fmt}){
+  const [period, setPeriod] = useState('week');
+  const grouped = useMemo(()=>{
+    const map = {};
+    rows.filter(r=>r.date).forEach(r=>{
+      const key = period==='week' ? weekStartKey(r.date) : r.date.slice(0,7);
+      map[key] = (map[key]||0) + r.profit;
+    });
+    return Object.entries(map).sort((a,b)=> b[0].localeCompare(a[0])).slice(0,8);
+  },[rows,period]);
+  const maxAbs = Math.max(1, ...grouped.map(([,v])=>Math.abs(v)));
+  return (<div>
+    <div style={{display:'flex',gap:6,marginBottom:12}}>
+      <button onClick={()=>setPeriod('week')} style={{background:period==='week'?T.surfaceAlt:'transparent',border:'1px solid '+T.border,borderRadius:6,color:period==='week'?T.text:T.textFaint,fontFamily:fontBody,fontSize:12,padding:'5px 10px',cursor:'pointer'}}>Týdny</button>
+      <button onClick={()=>setPeriod('month')} style={{background:period==='month'?T.surfaceAlt:'transparent',border:'1px solid '+T.border,borderRadius:6,color:period==='month'?T.text:T.textFaint,fontFamily:fontBody,fontSize:12,padding:'5px 10px',cursor:'pointer'}}>Měsíce</button>
+    </div>
+    {grouped.length===0 && <div style={{color:T.textFaint,fontSize:13,fontFamily:fontBody,padding:'8px 0'}}>Zatím žádná data.</div>}
+    {grouped.map(([key,val])=>(
+      <div key={key} style={{position:'relative',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,overflow:'hidden',borderRadius:6}}>
+        <div style={{position:'absolute',left:0,top:0,bottom:0,width:(Math.abs(val)/maxAbs*100)+'%',background:val>=0?T.positive:T.negative,opacity:0.14}} />
+        <span style={{position:'relative',fontFamily:fontBody,fontSize:13,color:T.textMuted}}>{period==='week' ? ('Týden od '+fmtDateCz(key)) : key}</span>
+        <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:val>=0?T.positive:T.negative}}>{fmt(val)}</span>
+      </div>
+    ))}
+  </div>);
+}
+
 // ---------- META TAB (CZK) ----------
 
 function MetaTab({data, setData}){
@@ -161,6 +240,8 @@ function MetaTab({data, setData}){
       avgDaily: activeDays>0?totalProfit/activeDays:0 };
   },[computedRows]);
   const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
+  const [showChart, setShowChart] = useState(false);
+  const [showPeriod, setShowPeriod] = useState(false);
   const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
   const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:'0',adSpend:'0'}]}));
@@ -186,6 +267,14 @@ function MetaTab({data, setData}){
       <MetricCard label="Profit margin" value={fmtPct(totals.marginPct)} />
       <MetricCard label="Ø denní profit" value={fmtKc(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
+
+    <div style={{display:'flex',gap:8,marginBottom:showChart||showPeriod?12:18}}>
+      <ToolbarToggle label="Graf" icon={<IconChart/>} active={showChart} onClick={()=>setShowChart(v=>!v)} accent={T.meta} />
+      <ToolbarToggle label="Přehled" icon={<IconCalendar/>} active={showPeriod} onClick={()=>setShowPeriod(v=>!v)} accent={T.meta} />
+    </div>
+    {showChart && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><ProfitChart rows={computedRows} fmt={fmtKc} /></div>}
+    {showPeriod && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><PeriodSummary rows={computedRows} fmt={fmtKc} /></div>}
+
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
       <table style={{width:'100%',borderCollapse:'collapse',minWidth:640,tableLayout:'fixed'}}>
         <thead><tr style={{background:T.surface}}>
@@ -201,7 +290,7 @@ function MetaTab({data, setData}){
         <tbody>
           {computedRows.length===0 && <tr><td colSpan={8} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
           {computedRows.map((r,i)=>(
-            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+            <tr key={r.id}>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={inputStyle} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',e.target.value)} /></td>
@@ -227,15 +316,12 @@ function MetaTab({data, setData}){
 function PinterestTab({data, setData}){
   const {settings, rows} = data;
   const computedRows = useMemo(()=>rows.map(r=>{
-    const spend=toNum(r.spend), impressions=toNum(r.impressions), pinClicks=toNum(r.pinClicks), outboundClicks=toNum(r.outboundClicks), conversions=toNum(r.conversions), orderValue=toNum(r.orderValue), margin=toNum(settings.margin);
+    const spend=toNum(r.spend), conversions=toNum(r.conversions), orderValue=toNum(r.orderValue), margin=toNum(settings.margin);
     const cpa = conversions>0 ? spend/conversions : 0;
     const roas = spend>0 ? orderValue/spend : 0;
-    const convRate = outboundClicks>0 ? (conversions/outboundClicks)*100 : 0;
-    const cpc = pinClicks>0 ? spend/pinClicks : 0;
-    const ctr = impressions>0 ? (pinClicks/impressions)*100 : 0;
     const profit = orderValue*(margin/100) - spend;
     const profitPct = spend>0 ? (profit/spend)*100 : 0;
-    return {...r, spendNum:spend, cpa, roas, convRate, cpc, ctr, profit, profitPct};
+    return {...r, spendNum:spend, cpa, roas, profit, profitPct};
   }),[rows,settings]);
   const totals = useMemo(()=>{
     const totalSpend = computedRows.reduce((s,r)=>s+r.spendNum,0);
@@ -248,27 +334,23 @@ function PinterestTab({data, setData}){
       avgDaily: activeDays>0?totalProfit/activeDays:0 };
   },[computedRows]);
   const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
+  const [showChart, setShowChart] = useState(false);
+  const [showPeriod, setShowPeriod] = useState(false);
   const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
-  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),spend:'0',impressions:'0',pinClicks:'0',outboundClicks:'0',conversions:'0',orderValue:'0'}]}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),spend:'0',conversions:'0',orderValue:'0'}]}));
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
   const cols = [
-    {key:'date',label:'Datum',w:'110px',isDate:true},
-    {key:'spend',label:'Spend',w:'80px'},
-    {key:'impressions',label:'Impr.',w:'80px'},
-    {key:'pinClicks',label:'Pin clicks',w:'80px'},
-    {key:'outboundClicks',label:'Outb. clicks',w:'90px'},
-    {key:'conversions',label:'Conv.',w:'70px'},
-    {key:'orderValue',label:'Order value',w:'100px'},
+    {key:'date',label:'Datum',w:'120px',isDate:true},
+    {key:'spend',label:'Spend',w:'90px'},
+    {key:'conversions',label:'Conv.',w:'80px'},
+    {key:'orderValue',label:'Order value',w:'110px'},
   ];
   const calcCols = [
-    {key:'cpa',label:'CPA',w:'80px'},
-    {key:'roas',label:'ROAS',w:'70px'},
-    {key:'convRate',label:'Conv. rate',w:'90px'},
-    {key:'cpc',label:'CPC',w:'80px'},
-    {key:'ctr',label:'CTR',w:'80px'},
-    {key:'profit',label:'Profit',w:'100px'},
-    {key:'profitPct',label:'Profit %',w:'90px'},
+    {key:'cpa',label:'CPA',w:'90px'},
+    {key:'roas',label:'ROAS',w:'80px'},
+    {key:'profit',label:'Profit',w:'110px'},
+    {key:'profitPct',label:'Profit %',w:'100px'},
   ];
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
@@ -285,6 +367,14 @@ function PinterestTab({data, setData}){
       <MetricCard label="Konverze" value={fmtNum(totals.totalConversions)} />
       <MetricCard label="Ø denní profit" value={fmtEur(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
+
+    <div style={{display:'flex',gap:8,marginBottom:showChart||showPeriod?12:18}}>
+      <ToolbarToggle label="Graf" icon={<IconChart/>} active={showChart} onClick={()=>setShowChart(v=>!v)} accent={T.pin} />
+      <ToolbarToggle label="Přehled" icon={<IconCalendar/>} active={showPeriod} onClick={()=>setShowPeriod(v=>!v)} accent={T.pin} />
+    </div>
+    {showChart && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><ProfitChart rows={computedRows} fmt={fmtEur} /></div>}
+    {showPeriod && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><PeriodSummary rows={computedRows} fmt={fmtEur} /></div>}
+
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
       <table style={{borderCollapse:'collapse',tableLayout:'fixed',width:'max-content',minWidth:'100%'}}>
         <thead><tr style={{background:T.surface}}>
@@ -295,7 +385,7 @@ function PinterestTab({data, setData}){
         <tbody>
           {computedRows.length===0 && <tr><td colSpan={cols.length+calcCols.length+1} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
           {computedRows.map((r,i)=>(
-            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+            <tr key={r.id}>
               {cols.map(c=>(
                 <td key={c.key} style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft}}>
                   {c.isDate
@@ -305,9 +395,6 @@ function PinterestTab({data, setData}){
               ))}
               <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.cpa)}</td>
               <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=1.5?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
-              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtPct(r.convRate)}</td>
-              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.cpc)}</td>
-              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtPct(r.ctr)}</td>
               <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
                 <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtEur(r.profit)}</span>
@@ -372,7 +459,7 @@ function OrdersTab({data, setData}){
         <tbody>
           {computedRows.length===0 && <tr><td colSpan={5} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádné objednávky. Přidej první.</td></tr>}
           {computedRows.map((r,i)=>(
-            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+            <tr key={r.id}>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="text" style={inputStyle} value={r.orderNumber} onChange={e=>updateRow(r.id,'orderNumber',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.paidUsd} onChange={e=>updateRow(r.id,'paidUsd',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.earnedEur} onChange={e=>updateRow(r.id,'earnedEur',e.target.value)} /></td>
@@ -492,7 +579,7 @@ function InvoicesTab({storeId}){
         <tbody>
           {loaded && invoices.length===0 && <tr><td colSpan={4} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádné faktury. Přidej první výše.</td></tr>}
           {invoices.map((r,i)=>(
-            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+            <tr key={r.id}>
               <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{r.date}</td>
               <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,fontFamily:fontBody,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
                 <button onClick={()=>handleView(r)} style={{background:'transparent',border:'none',color:T.invoice,cursor:'pointer',fontFamily:fontBody,fontSize:13,padding:0,textDecoration:'underline',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis'}}>{r.fileName}</button>
