@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Profitomat</title>
+<meta name="theme-color" content="#12141A" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Profitomat" />
+<style>
+  html, body { margin: 0; padding: 0; background: #12141A; }
+  * { box-sizing: border-box; }
+  input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+const T = {
+  bg: '#12141A', surface: '#191C24', surfaceAlt: '#1F232D',
+  border: '#2A2E3A', borderSoft: '#22252F', text: '#EDEFF3',
+  textMuted: '#8B90A0', textFaint: '#5C616F',
+  positive: '#3ED9A0', negative: '#FF6B6E',
+  meta: '#7C8CFF', metaDim: 'rgba(124,140,255,0.14)',
+  pin: '#E0245E', pinDim: 'rgba(224,36,94,0.14)',
+  paprika: '#E8622C',
+};
+const fontDisplay = "'Space Grotesk','Segoe UI',system-ui,sans-serif";
+const fontBody = "'Inter','Segoe UI',system-ui,sans-serif";
+const fontMono = "'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace";
+
+function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
+function fmtEur(n,d=2){ if(!isFinite(n)) n=0; const s=Math.abs(n).toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return (n<0?'-':'')+'€'+s; }
+function fmtPct(n,d=1){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d})+'%'; }
+function fmtNum(n,d=0){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+
+const storage = {
+  get(key){ try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch(e){ return null; } },
+  set(key, val){ try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch(e){ return false; } }
+};
+
+const inputStyle = { background: T.surfaceAlt, border: '1px solid '+T.border, borderRadius: 6, color: T.text, fontFamily: fontMono, fontSize: 13, padding: '6px 8px', outline: 'none', width: '100%' };
+
+function Field({label, children}){
+  return (<div style={{display:'flex',flexDirection:'column',gap:4}}>
+    <span style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint}}>{label}</span>
+    {children}
+  </div>);
+}
+function MetricCard({label, value, sub, tone}){
+  const color = tone==='positive'?T.positive:tone==='negative'?T.negative:T.text;
+  return (<div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'14px 16px',minWidth:0}}>
+    <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:6}}>{label}</div>
+    <div style={{fontFamily:fontMono,fontSize:22,fontWeight:600,color,lineHeight:1.1}}>{value}</div>
+    {sub && <div style={{fontFamily:fontBody,fontSize:12,color:T.textMuted,marginTop:4}}>{sub}</div>}
+  </div>);
+}
+function DataBar({value, max, positive}){
+  const pct = max>0 ? Math.min(100,(Math.abs(value)/max)*100) : 0;
+  const color = positive ? T.positive : T.negative;
+  return (<div style={{position:'absolute',left:0,top:0,bottom:0,right:0,pointerEvents:'none',overflow:'hidden',borderRadius:4}}>
+    <div style={{position:'absolute',left:0,top:0,bottom:0,width:pct+'%',background:color,opacity:0.16}} />
+  </div>);
+}
+function IconBtn({onClick, children, title, danger}){
+  return (<button onClick={onClick} title={title} style={{background:'transparent',border:'none',color:danger?T.textFaint:T.textMuted,cursor:'pointer',padding:6,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center'}}
+    onMouseEnter={e=>{e.currentTarget.style.color=danger?T.negative:T.text;e.currentTarget.style.background=T.surfaceAlt;}}
+    onMouseLeave={e=>{e.currentTarget.style.color=danger?T.textFaint:T.textMuted;e.currentTarget.style.background='transparent';}}>
+    {children}
+  </button>);
+}
+function AddBtn({onClick, label, accent}){
+  return (<button onClick={onClick} style={{display:'flex',alignItems:'center',gap:6,background:'transparent',border:'1px dashed '+T.border,borderRadius:8,color:T.textMuted,fontFamily:fontBody,fontSize:13,padding:'9px 14px',cursor:'pointer'}}
+    onMouseEnter={e=>{e.currentTarget.style.borderColor=accent;e.currentTarget.style.color=T.text;}}
+    onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;e.currentTarget.style.color=T.textMuted;}}>
+    + {label}
+  </button>);
+}
+
+function MetaTab({data, setData}){
+  const {settings, rows} = data;
+  const beroas = useMemo(()=>{ const net = settings.price - settings.fulfillCost - settings.otherFees; return net>0 ? settings.price/net : 0; },[settings]);
+  const computedRows = useMemo(()=>rows.map(r=>{
+    const revenue = r.units*settings.price;
+    const fulfill = r.units*(settings.fulfillCost+settings.otherFees);
+    const profit = revenue - fulfill - r.adSpend;
+    const roas = r.adSpend>0 ? revenue/r.adSpend : 0;
+    return {...r, revenue, fulfill, profit, roas};
+  }),[rows,settings]);
+  const totals = useMemo(()=>{
+    const totalProfit = computedRows.reduce((s,r)=>s+r.profit,0);
+    const totalRevenue = computedRows.reduce((s,r)=>s+r.revenue,0);
+    const totalSpend = computedRows.reduce((s,r)=>s+r.adSpend,0);
+    const activeDays = computedRows.filter(r=>r.adSpend>0||r.units>0).length;
+    return { totalProfit, totalRevenue, totalSpend,
+      blendedRoas: totalSpend>0?totalRevenue/totalSpend:0,
+      marginPct: totalRevenue>0?(totalProfit/totalRevenue)*100:0,
+      avgDaily: activeDays>0?totalProfit/activeDays:0 };
+  },[computedRows]);
+  const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
+  const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
+  const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:0,adSpend:0}]}));
+  const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
+
+  return (<div>
+    <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Ekonomika produktu</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:14}}>
+        <Field label="Cena produktu (€)"><input style={inputStyle} type="number" step="0.01" value={settings.price} onChange={e=>updateSettings('price',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Fulfill náklady (€)"><input style={inputStyle} type="number" step="0.01" value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Ostatní poplatky (€)"><input style={inputStyle} type="number" step="0.01" value={settings.otherFees} onChange={e=>updateSettings('otherFees',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600}}>{beroas.toFixed(2)}</div></Field>
+      </div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
+      <MetricCard label="Total profit" value={fmtEur(totals.totalProfit)} tone={totals.totalProfit>=0?'positive':'negative'} />
+      <MetricCard label="Total revenue" value={fmtEur(totals.totalRevenue)} />
+      <MetricCard label="Total ad spend" value={fmtEur(totals.totalSpend)} />
+      <MetricCard label="Blended ROAS" value={totals.blendedRoas.toFixed(2)} sub={"Break-even: "+beroas.toFixed(2)} tone={totals.blendedRoas>=beroas?'positive':'negative'} />
+      <MetricCard label="Profit margin" value={fmtPct(totals.marginPct)} />
+      <MetricCard label="Ø denní profit" value={fmtEur(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
+    </div>
+    <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+        <thead><tr style={{background:T.surface}}>
+          {['Datum','Ks','Ad spend','Revenue','Fulfill','Profit','ROAS',''].map((h,i)=>(
+            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
+          ))}
+        </tr></thead>
+        <tbody>
+          {computedRows.length===0 && <tr><td colSpan={8} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
+          {computedRows.map((r,i)=>(
+            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={{...inputStyle,width:130}} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" style={{...inputStyle,width:60,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:80,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.revenue)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.fulfill)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
+                <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
+                <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtEur(r.profit)}</span>
+              </td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=beroas?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <div style={{marginTop:14}}><AddBtn onClick={addRow} label="Přidat den" accent={T.meta} /></div>
+  </div>);
+}
+
+function PinterestTab({data, setData}){
+  const {settings, rows} = data;
+  const computedRows = useMemo(()=>rows.map(r=>{
+    const cpa = r.conversions>0 ? r.spend/r.conversions : 0;
+    const roas = r.spend>0 ? r.orderValue/r.spend : 0;
+    const convRate = r.outboundClicks>0 ? (r.conversions/r.outboundClicks)*100 : 0;
+    const cpc = r.pinClicks>0 ? r.spend/r.pinClicks : 0;
+    const ctr = r.impressions>0 ? (r.pinClicks/r.impressions)*100 : 0;
+    const profit = r.orderValue*(settings.margin/100) - r.spend;
+    const profitPct = r.spend>0 ? (profit/r.spend)*100 : 0;
+    return {...r, cpa, roas, convRate, cpc, ctr, profit, profitPct};
+  }),[rows,settings]);
+  const totals = useMemo(()=>{
+    const totalSpend = computedRows.reduce((s,r)=>s+r.spend,0);
+    const totalOrderValue = computedRows.reduce((s,r)=>s+r.orderValue,0);
+    const totalProfit = computedRows.reduce((s,r)=>s+r.profit,0);
+    const totalConversions = computedRows.reduce((s,r)=>s+r.conversions,0);
+    const activeDays = computedRows.filter(r=>r.spend>0).length;
+    return { totalSpend, totalOrderValue, totalProfit, totalConversions,
+      blendedRoas: totalSpend>0?totalOrderValue/totalSpend:0,
+      avgDaily: activeDays>0?totalProfit/activeDays:0 };
+  },[computedRows]);
+  const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
+  const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
+  const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),spend:0,impressions:0,pinClicks:0,outboundClicks:0,conversions:0,orderValue:0}]}));
+  const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
+  const cols = [
+    {key:'date',label:'Datum',type:'date',w:130},
+    {key:'spend',label:'Spend',type:'number',step:'0.01',w:70},
+    {key:'impressions',label:'Impr.',type:'number',w:70},
+    {key:'pinClicks',label:'Pin clicks',type:'number',w:70},
+    {key:'outboundClicks',label:'Outb. clicks',type:'number',w:80},
+    {key:'conversions',label:'Conv.',type:'number',w:60},
+    {key:'orderValue',label:'Order value',type:'number',step:'0.01',w:90},
+  ];
+  return (<div>
+    <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Nastavení</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:14,maxWidth:300}}>
+        <Field label="Průměrná marže (%)"><input style={inputStyle} type="number" step="0.1" value={settings.margin} onChange={e=>updateSettings('margin',parseFloat(e.target.value)||0)} /></Field>
+      </div>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
+      <MetricCard label="Total profit" value={fmtEur(totals.totalProfit)} tone={totals.totalProfit>=0?'positive':'negative'} />
+      <MetricCard label="Total order value" value={fmtEur(totals.totalOrderValue)} />
+      <MetricCard label="Total spend" value={fmtEur(totals.totalSpend)} />
+      <MetricCard label="Blended ROAS" value={totals.blendedRoas.toFixed(2)} />
+      <MetricCard label="Konverze" value={fmtNum(totals.totalConversions)} />
+      <MetricCard label="Ø denní profit" value={fmtEur(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
+    </div>
+    <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:1080}}>
+        <thead><tr style={{background:T.surface}}>
+          {[...cols.map(c=>c.label),'CPA','ROAS','Conv. rate','CPC','CTR','Profit','Profit %',''].map((h,i)=>(
+            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 10px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
+          ))}
+        </tr></thead>
+        <tbody>
+          {computedRows.length===0 && <tr><td colSpan={cols.length+7} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
+          {computedRows.map((r,i)=>(
+            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+              {cols.map(c=>(
+                <td key={c.key} style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft}}>
+                  <input type={c.type} step={c.step} style={{...inputStyle,width:c.w,textAlign:c.type==='number'?'right':'left'}} value={r[c.key]} onChange={e=>updateRow(r.id,c.key,c.type==='number'?(parseFloat(e.target.value)||0):e.target.value)} />
+                </td>
+              ))}
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.cpa)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=1.5?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtPct(r.convRate)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.cpc)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtPct(r.ctr)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
+                <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
+                <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtEur(r.profit)}</span>
+              </td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.profitPct>=0?T.positive:T.negative}}>{fmtPct(r.profitPct)}</td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <div style={{marginTop:14}}><AddBtn onClick={addRow} label="Přidat den" accent={T.pin} /></div>
+  </div>);
+}
+
+const DEFAULT_META = { settings:{price:799, fulfillCost:300, otherFees:20}, rows:[] };
+const DEFAULT_PIN = { settings:{margin:62}, rows:[] };
+
+function App(){
+  const [tab,setTab] = useState('meta');
+  const [metaData,setMetaData] = useState(()=> storage.get('meta:data') || DEFAULT_META);
+  const [pinData,setPinData] = useState(()=> storage.get('pinterest:data') || DEFAULT_PIN);
+  const [saveState,setSaveState] = useState('idle');
+  const saveTimer = useRef(null);
+
+  useEffect(()=>{
+    setSaveState('saving');
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(()=>{
+      const ok1 = storage.set('meta:data', metaData);
+      const ok2 = storage.set('pinterest:data', pinData);
+      setSaveState(ok1 && ok2 ? 'saved' : 'error');
+    }, 400);
+    return ()=>clearTimeout(saveTimer.current);
+  },[metaData, pinData]);
+
+  return (<div style={{background:T.bg,minHeight:'100vh',padding:'28px 16px 60px',fontFamily:fontBody,color:T.text}}>
+    <div style={{maxWidth:1200,margin:'0 auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:24,flexWrap:'wrap',gap:12}}>
+        <div>
+          <div style={{fontFamily:fontDisplay,fontWeight:700,fontSize:26,letterSpacing:'-0.02em'}}>PROFITOMAT</div>
+          <div style={{fontSize:13,color:T.textMuted,marginTop:2}}>Denní přehled výkonu kampaní · Manos Cálida</div>
+        </div>
+        <div style={{fontSize:11,color:T.textFaint,fontFamily:fontMono}}>
+          {saveState==='saving'?'ukládám…':saveState==='saved'?'uloženo v telefonu/PC':saveState==='error'?'chyba ukládání':''}
+        </div>
+      </div>
+      <div style={{display:'flex',gap:4,marginBottom:22,background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:4,width:'fit-content'}}>
+        <button onClick={()=>setTab('meta')} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',borderRadius:7,border:'none',cursor:'pointer',background:tab==='meta'?T.metaDim:'transparent',color:tab==='meta'?T.meta:T.textMuted,fontFamily:fontDisplay,fontWeight:600,fontSize:13}}>
+          <span style={{width:7,height:7,borderRadius:'50%',background:T.meta}} /> META ADS
+        </button>
+        <button onClick={()=>setTab('pinterest')} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 16px',borderRadius:7,border:'none',cursor:'pointer',background:tab==='pinterest'?T.pinDim:'transparent',color:tab==='pinterest'?T.pin:T.textMuted,fontFamily:fontDisplay,fontWeight:600,fontSize:13}}>
+          <span style={{width:7,height:7,borderRadius:'50%',background:T.pin}} /> PINTEREST ADS
+        </button>
+      </div>
+      {tab==='meta' ? <MetaTab data={metaData} setData={setMetaData} /> : <PinterestTab data={pinData} setData={setPinData} />}
+    </div>
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  });
+}
+</script>
+</body>
+</html>
