@@ -15,9 +15,6 @@
 <style>
   html, body { margin: 0; padding: 0; background: #12141A; }
   * { box-sizing: border-box; }
-  input[type=number]::-webkit-outer-spin-button,
-  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-  input[type=number] { -moz-appearance: textfield; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -36,6 +33,7 @@ const T = {
   meta: '#7C8CFF', metaDim: 'rgba(124,140,255,0.14)',
   pin: '#E0245E', pinDim: 'rgba(224,36,94,0.14)',
   orders: '#3ED9A0', ordersDim: 'rgba(62,217,160,0.14)',
+  invoice: '#F5A623', invoiceDim: 'rgba(245,166,35,0.14)',
   paprika: '#E8622C',
 };
 const fontDisplay = "'Space Grotesk','Segoe UI',system-ui,sans-serif";
@@ -43,10 +41,11 @@ const fontBody = "'Inter','Segoe UI',system-ui,sans-serif";
 const fontMono = "'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace";
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
-function fmtEur(n,d=2){ if(!isFinite(n)) n=0; const s=Math.abs(n).toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return (n<0?'-':'')+'€'+s; }
-function fmtKc(n,d=2){ if(!isFinite(n)) n=0; const s=n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return s+' Kč'; }
-function fmtPct(n,d=1){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d})+'%'; }
-function fmtNum(n,d=0){ if(!isFinite(n)) n=0; return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function toNum(v){ if (typeof v === 'number') return isFinite(v) ? v : 0; if (v===undefined||v===null||v==='') return 0; const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) ? n : 0; }
+function fmtEur(n,d=2){ n = toNum(n); const s=Math.abs(n).toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return (n<0?'-':'')+'€'+s; }
+function fmtKc(n,d=2){ n = toNum(n); const s=n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); return s+' Kč'; }
+function fmtPct(n,d=1){ n = toNum(n); return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d})+'%'; }
+function fmtNum(n,d=0){ n = toNum(n); return n.toLocaleString('cs-CZ',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 
 const storage = {
@@ -55,7 +54,52 @@ const storage = {
   remove(key){ try { localStorage.removeItem(key); } catch(e){} }
 };
 
+// IndexedDB for invoice PDFs (holds much more data than localStorage)
+const IDB_NAME = 'profitomat-files';
+const IDB_STORE = 'invoices';
+function idbOpen(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbAdd(record){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).add(record);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGetAll(){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbDelete(id){
+  const db = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 const inputStyle = { background: T.surfaceAlt, border: '1px solid '+T.border, borderRadius: 6, color: T.text, fontFamily: fontMono, fontSize: 13, padding: '6px 8px', outline: 'none', width: '100%' };
+const numInputProps = { type: 'text', inputMode: 'decimal', autoComplete: 'off' };
 
 function Field({label, children}){
   return (<div style={{display:'flex',flexDirection:'column',gap:4}}>
@@ -97,19 +141,20 @@ function AddBtn({onClick, label, accent}){
 
 function MetaTab({data, setData}){
   const {settings, rows} = data;
-  const beroas = useMemo(()=>{ const net = settings.price - settings.fulfillCost - settings.otherFees; return net>0 ? settings.price/net : 0; },[settings]);
+  const beroas = useMemo(()=>{ const price=toNum(settings.price), fc=toNum(settings.fulfillCost), of=toNum(settings.otherFees); const net = price - fc - of; return net>0 ? price/net : 0; },[settings]);
   const computedRows = useMemo(()=>rows.map(r=>{
-    const revenue = r.units*settings.price;
-    const fulfill = r.units*(settings.fulfillCost+settings.otherFees);
-    const profit = revenue - fulfill - r.adSpend;
-    const roas = r.adSpend>0 ? revenue/r.adSpend : 0;
-    return {...r, revenue, fulfill, profit, roas};
+    const units=toNum(r.units), adSpend=toNum(r.adSpend), price=toNum(settings.price), fc=toNum(settings.fulfillCost), of=toNum(settings.otherFees);
+    const revenue = units*price;
+    const fulfill = units*(fc+of);
+    const profit = revenue - fulfill - adSpend;
+    const roas = adSpend>0 ? revenue/adSpend : 0;
+    return {...r, revenue, fulfill, profit, roas, adSpendNum:adSpend, unitsNum:units};
   }),[rows,settings]);
   const totals = useMemo(()=>{
     const totalProfit = computedRows.reduce((s,r)=>s+r.profit,0);
     const totalRevenue = computedRows.reduce((s,r)=>s+r.revenue,0);
-    const totalSpend = computedRows.reduce((s,r)=>s+r.adSpend,0);
-    const activeDays = computedRows.filter(r=>r.adSpend>0||r.units>0).length;
+    const totalSpend = computedRows.reduce((s,r)=>s+r.adSpendNum,0);
+    const activeDays = computedRows.filter(r=>r.adSpendNum>0||r.unitsNum>0).length;
     return { totalProfit, totalRevenue, totalSpend,
       blendedRoas: totalSpend>0?totalRevenue/totalSpend:0,
       marginPct: totalRevenue>0?(totalProfit/totalRevenue)*100:0,
@@ -118,16 +163,18 @@ function MetaTab({data, setData}){
   const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
   const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
-  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:0,adSpend:0}]}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:'0',adSpend:'0'}]}));
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
+
+  const cw = { date:'20%', units:'8%', adSpend:'12%', revenue:'14%', fulfill:'14%', profit:'14%', roas:'12%', del:'6%' };
 
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Ekonomika produktu</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:14}}>
-        <Field label="Cena produktu (Kč)"><input style={inputStyle} type="number" step="1" value={settings.price} onChange={e=>updateSettings('price',parseFloat(e.target.value)||0)} /></Field>
-        <Field label="Fulfill náklady (Kč)"><input style={inputStyle} type="number" step="1" value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',parseFloat(e.target.value)||0)} /></Field>
-        <Field label="Ostatní poplatky (Kč)"><input style={inputStyle} type="number" step="1" value={settings.otherFees} onChange={e=>updateSettings('otherFees',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Cena produktu (Kč)"><input {...numInputProps} style={inputStyle} value={settings.price} onChange={e=>updateSettings('price',e.target.value)} /></Field>
+        <Field label="Fulfill náklady (Kč)"><input {...numInputProps} style={inputStyle} value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',e.target.value)} /></Field>
+        <Field label="Ostatní poplatky (Kč)"><input {...numInputProps} style={inputStyle} value={settings.otherFees} onChange={e=>updateSettings('otherFees',e.target.value)} /></Field>
         <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600}}>{beroas.toFixed(2)}</div></Field>
       </div>
     </div>
@@ -140,19 +187,24 @@ function MetaTab({data, setData}){
       <MetricCard label="Ø denní profit" value={fmtKc(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640,tableLayout:'fixed'}}>
         <thead><tr style={{background:T.surface}}>
-          {['Datum','Ks','Ad spend','Revenue','Fulfill','Profit','ROAS',''].map((h,i)=>(
-            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
-          ))}
+          <th style={{width:cw.date,textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Datum</th>
+          <th style={{width:cw.units,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ks</th>
+          <th style={{width:cw.adSpend,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ad spend</th>
+          <th style={{width:cw.revenue,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Revenue</th>
+          <th style={{width:cw.fulfill,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Fulfill</th>
+          <th style={{width:cw.profit,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Profit</th>
+          <th style={{width:cw.roas,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>ROAS</th>
+          <th style={{width:cw.del,borderBottom:'1px solid '+T.border}}></th>
         </tr></thead>
         <tbody>
           {computedRows.length===0 && <tr><td colSpan={8} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
           {computedRows.map((r,i)=>(
             <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={{...inputStyle,width:130}} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" style={{...inputStyle,width:60,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',parseFloat(e.target.value)||0)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="1" style={{...inputStyle,width:80,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={inputStyle} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.revenue)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.fulfill)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
@@ -160,7 +212,7 @@ function MetaTab({data, setData}){
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtKc(r.profit)}</span>
               </td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=beroas?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
             </tr>
           ))}
         </tbody>
@@ -175,21 +227,22 @@ function MetaTab({data, setData}){
 function PinterestTab({data, setData}){
   const {settings, rows} = data;
   const computedRows = useMemo(()=>rows.map(r=>{
-    const cpa = r.conversions>0 ? r.spend/r.conversions : 0;
-    const roas = r.spend>0 ? r.orderValue/r.spend : 0;
-    const convRate = r.outboundClicks>0 ? (r.conversions/r.outboundClicks)*100 : 0;
-    const cpc = r.pinClicks>0 ? r.spend/r.pinClicks : 0;
-    const ctr = r.impressions>0 ? (r.pinClicks/r.impressions)*100 : 0;
-    const profit = r.orderValue*(settings.margin/100) - r.spend;
-    const profitPct = r.spend>0 ? (profit/r.spend)*100 : 0;
-    return {...r, cpa, roas, convRate, cpc, ctr, profit, profitPct};
+    const spend=toNum(r.spend), impressions=toNum(r.impressions), pinClicks=toNum(r.pinClicks), outboundClicks=toNum(r.outboundClicks), conversions=toNum(r.conversions), orderValue=toNum(r.orderValue), margin=toNum(settings.margin);
+    const cpa = conversions>0 ? spend/conversions : 0;
+    const roas = spend>0 ? orderValue/spend : 0;
+    const convRate = outboundClicks>0 ? (conversions/outboundClicks)*100 : 0;
+    const cpc = pinClicks>0 ? spend/pinClicks : 0;
+    const ctr = impressions>0 ? (pinClicks/impressions)*100 : 0;
+    const profit = orderValue*(margin/100) - spend;
+    const profitPct = spend>0 ? (profit/spend)*100 : 0;
+    return {...r, spendNum:spend, cpa, roas, convRate, cpc, ctr, profit, profitPct};
   }),[rows,settings]);
   const totals = useMemo(()=>{
-    const totalSpend = computedRows.reduce((s,r)=>s+r.spend,0);
-    const totalOrderValue = computedRows.reduce((s,r)=>s+r.orderValue,0);
+    const totalSpend = computedRows.reduce((s,r)=>s+r.spendNum,0);
+    const totalOrderValue = computedRows.reduce((s,r)=>s+toNum(r.orderValue),0);
     const totalProfit = computedRows.reduce((s,r)=>s+r.profit,0);
-    const totalConversions = computedRows.reduce((s,r)=>s+r.conversions,0);
-    const activeDays = computedRows.filter(r=>r.spend>0).length;
+    const totalConversions = computedRows.reduce((s,r)=>s+toNum(r.conversions),0);
+    const activeDays = computedRows.filter(r=>r.spendNum>0).length;
     return { totalSpend, totalOrderValue, totalProfit, totalConversions,
       blendedRoas: totalSpend>0?totalOrderValue/totalSpend:0,
       avgDaily: activeDays>0?totalProfit/activeDays:0 };
@@ -197,22 +250,31 @@ function PinterestTab({data, setData}){
   const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
   const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
-  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),spend:0,impressions:0,pinClicks:0,outboundClicks:0,conversions:0,orderValue:0}]}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),spend:'0',impressions:'0',pinClicks:'0',outboundClicks:'0',conversions:'0',orderValue:'0'}]}));
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
   const cols = [
-    {key:'date',label:'Datum',type:'date',w:130},
-    {key:'spend',label:'Spend',type:'number',step:'0.01',w:70},
-    {key:'impressions',label:'Impr.',type:'number',w:70},
-    {key:'pinClicks',label:'Pin clicks',type:'number',w:70},
-    {key:'outboundClicks',label:'Outb. clicks',type:'number',w:80},
-    {key:'conversions',label:'Conv.',type:'number',w:60},
-    {key:'orderValue',label:'Order value',type:'number',step:'0.01',w:90},
+    {key:'date',label:'Datum',w:'110px',isDate:true},
+    {key:'spend',label:'Spend',w:'80px'},
+    {key:'impressions',label:'Impr.',w:'80px'},
+    {key:'pinClicks',label:'Pin clicks',w:'80px'},
+    {key:'outboundClicks',label:'Outb. clicks',w:'90px'},
+    {key:'conversions',label:'Conv.',w:'70px'},
+    {key:'orderValue',label:'Order value',w:'100px'},
+  ];
+  const calcCols = [
+    {key:'cpa',label:'CPA',w:'80px'},
+    {key:'roas',label:'ROAS',w:'70px'},
+    {key:'convRate',label:'Conv. rate',w:'90px'},
+    {key:'cpc',label:'CPC',w:'80px'},
+    {key:'ctr',label:'CTR',w:'80px'},
+    {key:'profit',label:'Profit',w:'100px'},
+    {key:'profitPct',label:'Profit %',w:'90px'},
   ];
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Nastavení</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:14,maxWidth:300}}>
-        <Field label="Průměrná marže (%)"><input style={inputStyle} type="number" step="0.1" value={settings.margin} onChange={e=>updateSettings('margin',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Průměrná marže (%)"><input {...numInputProps} style={inputStyle} value={settings.margin} onChange={e=>updateSettings('margin',e.target.value)} /></Field>
       </div>
     </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
@@ -224,19 +286,21 @@ function PinterestTab({data, setData}){
       <MetricCard label="Ø denní profit" value={fmtEur(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:1080}}>
+      <table style={{borderCollapse:'collapse',tableLayout:'fixed',width:'max-content',minWidth:'100%'}}>
         <thead><tr style={{background:T.surface}}>
-          {[...cols.map(c=>c.label),'CPA','ROAS','Conv. rate','CPC','CTR','Profit','Profit %',''].map((h,i)=>(
-            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 10px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
-          ))}
+          {cols.map((c,i)=>(<th key={c.key} style={{width:c.w,textAlign:i===0?'left':'right',padding:'10px 10px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{c.label}</th>))}
+          {calcCols.map(c=>(<th key={c.key} style={{width:c.w,textAlign:'right',padding:'10px 10px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{c.label}</th>))}
+          <th style={{width:'46px',borderBottom:'1px solid '+T.border}}></th>
         </tr></thead>
         <tbody>
-          {computedRows.length===0 && <tr><td colSpan={cols.length+7} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
+          {computedRows.length===0 && <tr><td colSpan={cols.length+calcCols.length+1} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
           {computedRows.map((r,i)=>(
             <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
               {cols.map(c=>(
                 <td key={c.key} style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft}}>
-                  <input type={c.type} step={c.step} style={{...inputStyle,width:c.w,textAlign:c.type==='number'?'right':'left'}} value={r[c.key]} onChange={e=>updateRow(r.id,c.key,c.type==='number'?(parseFloat(e.target.value)||0):e.target.value)} />
+                  {c.isDate
+                    ? <input type="date" style={inputStyle} value={r[c.key]} onChange={e=>updateRow(r.id,c.key,e.target.value)} />
+                    : <input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r[c.key]} onChange={e=>updateRow(r.id,c.key,e.target.value)} />}
                 </td>
               ))}
               <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtEur(r.cpa)}</td>
@@ -249,7 +313,7 @@ function PinterestTab({data, setData}){
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtEur(r.profit)}</span>
               </td>
               <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.profitPct>=0?T.positive:T.negative}}>{fmtPct(r.profitPct)}</td>
-              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+              <td style={{padding:'6px 10px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
             </tr>
           ))}
         </tbody>
@@ -264,27 +328,30 @@ function PinterestTab({data, setData}){
 function OrdersTab({data, setData}){
   const {settings, rows} = data;
   const computedRows = useMemo(()=>rows.map(r=>{
-    const result = r.earnedEur*settings.kurzEur - r.paidUsd*settings.kurzUsd;
-    return {...r, result};
+    const earnedEur=toNum(r.earnedEur), paidUsd=toNum(r.paidUsd), kurzEur=toNum(settings.kurzEur), kurzUsd=toNum(settings.kurzUsd);
+    const result = earnedEur*kurzEur - paidUsd*kurzUsd;
+    return {...r, result, earnedEurNum:earnedEur, paidUsdNum:paidUsd};
   }),[rows,settings]);
   const totals = useMemo(()=>{
     const totalResult = computedRows.reduce((s,r)=>s+r.result,0);
-    const totalPaid = computedRows.reduce((s,r)=>s+r.paidUsd,0);
-    const totalEarned = computedRows.reduce((s,r)=>s+r.earnedEur,0);
+    const totalPaid = computedRows.reduce((s,r)=>s+r.paidUsdNum,0);
+    const totalEarned = computedRows.reduce((s,r)=>s+r.earnedEurNum,0);
     return { totalResult, totalPaid, totalEarned, count: computedRows.length };
   },[computedRows]);
   const maxAbsResult = Math.max(1, ...computedRows.map(r=>Math.abs(r.result)));
   const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
-  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),orderNumber:'#'+(1000+d.rows.length+1),paidUsd:0,earnedEur:0}]}));
+  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),orderNumber:'#'+(1000+d.rows.length+1),paidUsd:'0',earnedEur:'0'}]}));
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
+
+  const cw = { order:'22%', paid:'26%', earned:'26%', result:'20%', del:'6%' };
 
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Kurzy</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:14,maxWidth:400}}>
-        <Field label="Kurz EUR → CZK"><input style={inputStyle} type="number" step="0.01" value={settings.kurzEur} onChange={e=>updateSettings('kurzEur',parseFloat(e.target.value)||0)} /></Field>
-        <Field label="Kurz USD → CZK"><input style={inputStyle} type="number" step="0.01" value={settings.kurzUsd} onChange={e=>updateSettings('kurzUsd',parseFloat(e.target.value)||0)} /></Field>
+        <Field label="Kurz EUR → CZK"><input {...numInputProps} style={inputStyle} value={settings.kurzEur} onChange={e=>updateSettings('kurzEur',e.target.value)} /></Field>
+        <Field label="Kurz USD → CZK"><input {...numInputProps} style={inputStyle} value={settings.kurzUsd} onChange={e=>updateSettings('kurzUsd',e.target.value)} /></Field>
       </div>
     </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
@@ -294,30 +361,149 @@ function OrdersTab({data, setData}){
       <MetricCard label="Počet objednávek" value={fmtNum(totals.count)} />
     </div>
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640,tableLayout:'fixed'}}>
         <thead><tr style={{background:T.surface}}>
-          {['Objednávka','Zaplaceno (nákup, $)','Vydělal (€)','Výsledek (Kč)',''].map((h,i)=>(
-            <th key={i} style={{textAlign:i===0?'left':'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap'}}>{h}</th>
-          ))}
+          <th style={{width:cw.order,textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Objednávka</th>
+          <th style={{width:cw.paid,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Zaplaceno ($)</th>
+          <th style={{width:cw.earned,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Vydělal (€)</th>
+          <th style={{width:cw.result,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Výsledek (Kč)</th>
+          <th style={{width:cw.del,borderBottom:'1px solid '+T.border}}></th>
         </tr></thead>
         <tbody>
           {computedRows.length===0 && <tr><td colSpan={5} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádné objednávky. Přidej první.</td></tr>}
           {computedRows.map((r,i)=>(
             <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="text" style={{...inputStyle,width:90}} value={r.orderNumber} onChange={e=>updateRow(r.id,'orderNumber',e.target.value)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:100,textAlign:'right'}} value={r.paidUsd} onChange={e=>updateRow(r.id,'paidUsd',parseFloat(e.target.value)||0)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="number" step="0.01" style={{...inputStyle,width:100,textAlign:'right'}} value={r.earnedEur} onChange={e=>updateRow(r.id,'earnedEur',parseFloat(e.target.value)||0)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="text" style={inputStyle} value={r.orderNumber} onChange={e=>updateRow(r.id,'orderNumber',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.paidUsd} onChange={e=>updateRow(r.id,'paidUsd',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.earnedEur} onChange={e=>updateRow(r.id,'earnedEur',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
                 <DataBar value={r.result} max={maxAbsResult} positive={r.result>=0} />
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.result>=0?T.positive:T.negative}}>{fmtKc(r.result)}</span>
               </td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
     <div style={{marginTop:14}}><AddBtn onClick={addRow} label="Přidat objednávku" accent={T.orders} /></div>
+  </div>);
+}
+
+// ---------- INVOICES TAB (PDF uploads, stored per device in IndexedDB) ----------
+
+function InvoicesTab({storeId}){
+  const [invoices, setInvoices] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(todayISO());
+  const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
+
+  const reload = async () => {
+    const all = await idbGetAll();
+    setInvoices(all.filter(r=>r.storeId===storeId).sort((a,b)=> b.date.localeCompare(a.date)));
+  };
+  useEffect(()=>{ reload().then(()=>setLoaded(true)); },[storeId]);
+
+  const handleAdd = async () => {
+    if (!pendingFile) { setError('Nejdřív vyber PDF soubor.'); return; }
+    if (toNum(amount) <= 0) { setError('Zadej částku faktury.'); return; }
+    setError('');
+    const record = {
+      id: uid(), storeId, fileName: pendingFile.name, fileType: pendingFile.type,
+      size: pendingFile.size, amount: toNum(amount), date, blob: pendingFile,
+    };
+    await idbAdd(record);
+    setPendingFile(null); setAmount(''); setDate(todayISO());
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    reload();
+  };
+  const handleDelete = async (id) => { await idbDelete(id); reload(); };
+  const handleView = (record) => {
+    const url = URL.createObjectURL(record.blob);
+    window.open(url, '_blank');
+    setTimeout(()=>URL.revokeObjectURL(url), 60000);
+  };
+
+  const totals = useMemo(()=>{
+    const now = new Date();
+    const yearStr = String(now.getFullYear());
+    const monthStr = yearStr+'-'+String(now.getMonth()+1).padStart(2,'0');
+    const totalYear = invoices.filter(r=>r.date.startsWith(yearStr)).reduce((s,r)=>s+r.amount,0);
+    const totalMonth = invoices.filter(r=>r.date.startsWith(monthStr)).reduce((s,r)=>s+r.amount,0);
+    const totalAll = invoices.reduce((s,r)=>s+r.amount,0);
+    const byMonth = {};
+    invoices.forEach(r=>{ const m = r.date.slice(0,7); byMonth[m] = (byMonth[m]||0) + r.amount; });
+    const monthRows = Object.entries(byMonth).sort((a,b)=> b[0].localeCompare(a[0]));
+    return { totalYear, totalMonth, totalAll, count: invoices.length, monthRows };
+  },[invoices]);
+
+  return (<div>
+    <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Přidat fakturu</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:14,alignItems:'end'}}>
+        <Field label="PDF soubor">
+          <input ref={fileInputRef} type="file" accept="application/pdf" style={{...inputStyle,padding:'5px 8px'}} onChange={e=>setPendingFile(e.target.files[0]||null)} />
+        </Field>
+        <Field label="Datum"><input type="date" style={inputStyle} value={date} onChange={e=>setDate(e.target.value)} /></Field>
+        <Field label="Částka (Kč)"><input {...numInputProps} style={inputStyle} placeholder="0" value={amount} onChange={e=>setAmount(e.target.value)} /></Field>
+        <button onClick={handleAdd} style={{background:T.invoice,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer',height:36}}>Přidat fakturu</button>
+      </div>
+      {error && <div style={{color:T.negative,fontSize:13,marginTop:10,fontFamily:fontBody}}>{error}</div>}
+      {pendingFile && !error && <div style={{color:T.textMuted,fontSize:12,marginTop:10,fontFamily:fontBody}}>Vybráno: {pendingFile.name}</div>}
+    </div>
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
+      <MetricCard label="Celkem tento měsíc" value={fmtKc(totals.totalMonth)} />
+      <MetricCard label="Celkem tento rok" value={fmtKc(totals.totalYear)} />
+      <MetricCard label="Celkem vše" value={fmtKc(totals.totalAll)} />
+      <MetricCard label="Počet faktur" value={fmtNum(totals.count)} />
+    </div>
+
+    {totals.monthRows.length > 0 && (
+      <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10,marginBottom:18}}>
+        <table style={{width:'100%',borderCollapse:'collapse',tableLayout:'fixed'}}>
+          <thead><tr style={{background:T.surface}}>
+            <th style={{width:'50%',textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Měsíc</th>
+            <th style={{width:'50%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Celkem</th>
+          </tr></thead>
+          <tbody>
+            {totals.monthRows.map(([m,total])=>(
+              <tr key={m}>
+                <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{m}</td>
+                <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,fontWeight:600,color:T.text}}>{fmtKc(total)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+
+    <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
+      <table style={{width:'100%',borderCollapse:'collapse',tableLayout:'fixed',minWidth:520}}>
+        <thead><tr style={{background:T.surface}}>
+          <th style={{width:'18%',textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Datum</th>
+          <th style={{width:'42%',textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Soubor</th>
+          <th style={{width:'22%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Částka</th>
+          <th style={{width:'18%',borderBottom:'1px solid '+T.border}}></th>
+        </tr></thead>
+        <tbody>
+          {loaded && invoices.length===0 && <tr><td colSpan={4} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádné faktury. Přidej první výše.</td></tr>}
+          {invoices.map((r,i)=>(
+            <tr key={r.id} style={{background:i%2===1?T.surfaceAlt:'transparent'}}>
+              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{r.date}</td>
+              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,fontFamily:fontBody,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                <button onClick={()=>handleView(r)} style={{background:'transparent',border:'none',color:T.invoice,cursor:'pointer',fontFamily:fontBody,fontSize:13,padding:0,textDecoration:'underline',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis'}}>{r.fileName}</button>
+              </td>
+              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,fontWeight:600}}>{fmtKc(r.amount)}</td>
+              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>handleDelete(r.id)} title="Smazat fakturu" danger>✕</IconBtn></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   </div>);
 }
 
@@ -354,9 +540,9 @@ function StorePicker({stores, onSelect, onCreate, onDelete}){
 
 // ---------- WORKSPACE (per-store) ----------
 
-const DEFAULT_META = { settings: { price: 999, fulfillCost: 300, otherFees: 20 }, rows: [] };
-const DEFAULT_PIN = { settings: { margin: 62 }, rows: [] };
-const DEFAULT_ORDERS = { settings: { kurzEur: 24.2, kurzUsd: 21 }, rows: [] };
+const DEFAULT_META = { settings: { price: '999', fulfillCost: '300', otherFees: '20' }, rows: [] };
+const DEFAULT_PIN = { settings: { margin: '62' }, rows: [] };
+const DEFAULT_ORDERS = { settings: { kurzEur: '24.2', kurzUsd: '21' }, rows: [] };
 
 function Workspace({storeId, storeName, onBack}){
   const [tab, setTab] = useState('meta');
@@ -382,6 +568,7 @@ function Workspace({storeId, storeName, onBack}){
     {id:'meta', label:'META ADS', color:T.meta, dim:T.metaDim},
     {id:'pinterest', label:'PINTEREST ADS', color:T.pin, dim:T.pinDim},
     {id:'orders', label:'OBJEDNÁVKY', color:T.orders, dim:T.ordersDim},
+    {id:'invoices', label:'FAKTURY', color:T.invoice, dim:T.invoiceDim},
   ];
 
   return (<div style={{background:T.bg,minHeight:'100vh',padding:'28px 16px 60px',fontFamily:fontBody,color:T.text}}>
@@ -406,6 +593,7 @@ function Workspace({storeId, storeName, onBack}){
       {tab==='meta' && <MetaTab data={metaData} setData={setMetaData} />}
       {tab==='pinterest' && <PinterestTab data={pinData} setData={setPinData} />}
       {tab==='orders' && <OrdersTab data={ordersData} setData={setOrdersData} />}
+      {tab==='invoices' && <InvoicesTab storeId={storeId} />}
     </div>
   </div>);
 }
@@ -426,6 +614,7 @@ function App(){
     storage.remove('store:'+id+':meta');
     storage.remove('store:'+id+':pinterest');
     storage.remove('store:'+id+':orders');
+    idbGetAll().then(all => { all.filter(r=>r.storeId===id).forEach(r => idbDelete(r.id)); });
     if (currentStoreId===id) setCurrentStoreId(null);
   };
 
