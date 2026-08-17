@@ -19,11 +19,47 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-firestore-compat.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef } = React;
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB1dG5l0ON2OH_cOo3YJutgYdRhEmKthYs",
+  authDomain: "profitomat-732a7.firebaseapp.com",
+  projectId: "profitomat-732a7",
+  storageBucket: "profitomat-732a7.firebasestorage.app",
+  messagingSenderId: "98737322308",
+  appId: "1:98737322308:web:bcf49686fd2bcd7229ff11"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+try { db.enablePersistence({ synchronizeTabs: true }); } catch(e) {}
+
+function storesCollection(){ return db.collection('stores'); }
+function watchStores(onData, onError){
+  return storesCollection().onSnapshot(snap=>{
+    const list = [];
+    snap.forEach(doc=>list.push({ id: doc.id, name: (doc.data()||{}).name || '' }));
+    list.sort((a,b)=>a.name.localeCompare(b.name));
+    onData(list);
+  }, onError);
+}
+function createStoreDoc(id, name){
+  return storesCollection().doc(id).set({ name, meta: DEFAULT_META, pinterest: DEFAULT_PIN, orders: DEFAULT_ORDERS });
+}
+function deleteStoreDoc(id){ return storesCollection().doc(id).delete(); }
+function watchStoreData(id, onData, onError){
+  return storesCollection().doc(id).onSnapshot(snap=>{
+    if (snap.exists) onData(snap.data());
+  }, onError);
+}
+function updateStoreField(id, field, value){
+  return storesCollection().doc(id).set({ [field]: value }, { merge: true });
+}
 
 const T = {
   bg: '#12141A', surface: '#191C24', surfaceAlt: '#1F232D',
@@ -596,12 +632,13 @@ function InvoicesTab({storeId}){
 
 // ---------- STORE PICKER ----------
 
-function StorePicker({stores, onSelect, onCreate, onDelete}){
+function StorePicker({stores, loaded, connError, onSelect, onCreate, onDelete}){
   const [name, setName] = useState('');
   return (<div style={{background:T.bg,minHeight:'100vh',padding:'60px 20px',fontFamily:fontBody,color:T.text}}>
     <div style={{maxWidth:520,margin:'0 auto'}}>
       <div style={{fontFamily:fontDisplay,fontWeight:700,fontSize:22,letterSpacing:'-0.02em',marginBottom:4,textAlign:'center',color:T.textMuted}}>PROFITOMAT</div>
-      <div style={{fontSize:13,color:T.textFaint,marginBottom:36,textAlign:'center'}}>Vyber obchod, který chceš sledovat</div>
+      <div style={{fontSize:13,color:T.textFaint,marginBottom:connError?10:36,textAlign:'center'}}>Vyber obchod, který chceš sledovat</div>
+      {connError && <div style={{fontSize:12,color:T.negative,textAlign:'center',marginBottom:26,fontFamily:fontBody}}>Nepodařilo se připojit ke cloudu. Zkontroluj internet a obnov stránku.</div>}
 
       <div style={{display:'flex',flexDirection:'column',gap:10,marginBottom:28}}>
         {stores.map(s=>(
@@ -614,7 +651,8 @@ function StorePicker({stores, onSelect, onCreate, onDelete}){
             <IconBtn onClick={()=>onDelete(s.id)} title="Smazat obchod" danger>✕</IconBtn>
           </div>
         ))}
-        {stores.length===0 && <div style={{color:T.textFaint,fontSize:13,textAlign:'center',padding:'12px 0'}}>Zatím žádný obchod. Přidej první níže.</div>}
+        {loaded && stores.length===0 && <div style={{color:T.textFaint,fontSize:13,textAlign:'center',padding:'12px 0'}}>Zatím žádný obchod. Přidej první níže.</div>}
+        {!loaded && !connError && <div style={{color:T.textFaint,fontSize:13,textAlign:'center',padding:'12px 0'}}>Načítám obchody…</div>}
       </div>
 
       <div style={{display:'flex',gap:8}}>
@@ -633,23 +671,37 @@ const DEFAULT_ORDERS = { settings: { kurzEur: '24.2', kurzUsd: '21' }, rows: [] 
 
 function Workspace({storeId, storeName, onBack}){
   const [tab, setTab] = useState('meta');
-  const [metaData, setMetaData] = useState(()=> storage.get('store:'+storeId+':meta') || DEFAULT_META);
-  const [pinData, setPinData] = useState(()=> storage.get('store:'+storeId+':pinterest') || DEFAULT_PIN);
-  const [ordersData, setOrdersData] = useState(()=> storage.get('store:'+storeId+':orders') || DEFAULT_ORDERS);
+  const [metaData, setMetaData] = useState(DEFAULT_META);
+  const [pinData, setPinData] = useState(DEFAULT_PIN);
+  const [ordersData, setOrdersData] = useState(DEFAULT_ORDERS);
+  const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState('idle');
   const saveTimer = useRef(null);
 
   useEffect(()=>{
+    setLoaded(false);
+    const unsub = watchStoreData(storeId, (data)=>{
+      if (data.meta) setMetaData(data.meta);
+      if (data.pinterest) setPinData(data.pinterest);
+      if (data.orders) setOrdersData(data.orders);
+      setLoaded(true);
+    }, ()=>setSaveState('error'));
+    return unsub;
+  },[storeId]);
+
+  useEffect(()=>{
+    if (!loaded) return;
     setSaveState('saving');
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(()=>{
-      const ok1 = storage.set('store:'+storeId+':meta', metaData);
-      const ok2 = storage.set('store:'+storeId+':pinterest', pinData);
-      const ok3 = storage.set('store:'+storeId+':orders', ordersData);
-      setSaveState(ok1 && ok2 && ok3 ? 'saved' : 'error');
-    }, 400);
+      Promise.all([
+        updateStoreField(storeId,'meta',metaData),
+        updateStoreField(storeId,'pinterest',pinData),
+        updateStoreField(storeId,'orders',ordersData),
+      ]).then(()=>setSaveState('saved')).catch(()=>setSaveState('error'));
+    }, 500);
     return ()=>clearTimeout(saveTimer.current);
-  },[metaData, pinData, ordersData, storeId]);
+  },[metaData, pinData, ordersData, loaded, storeId]);
 
   const tabs = [
     {id:'meta', label:'META ADS', color:T.meta, dim:T.metaDim},
@@ -667,7 +719,7 @@ function Workspace({storeId, storeName, onBack}){
           <div style={{fontSize:12,color:T.textFaint,marginTop:3,letterSpacing:'0.04em',textTransform:'uppercase'}}>Profitomat · Denní přehled výkonu kampaní</div>
         </div>
         <div style={{fontSize:11,color:T.textFaint,fontFamily:fontMono}}>
-          {saveState==='saving'?'ukládám…':saveState==='saved'?'uloženo v tomto zařízení':saveState==='error'?'chyba ukládání':''}
+          {saveState==='saving'?'synchronizuji…':saveState==='saved'?'synchronizováno v cloudu':saveState==='error'?'chyba připojení':''}
         </div>
       </div>
       <div style={{display:'flex',gap:4,marginBottom:22,background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:4,width:'fit-content',flexWrap:'wrap'}}>
@@ -688,25 +740,31 @@ function Workspace({storeId, storeName, onBack}){
 // ---------- APP ----------
 
 function App(){
-  const [stores, setStores] = useState(()=> storage.get('stores:list') || []);
+  const [stores, setStores] = useState([]);
+  const [storesLoaded, setStoresLoaded] = useState(false);
+  const [connError, setConnError] = useState(false);
   const [currentStoreId, setCurrentStoreId] = useState(null);
 
-  const persistStores = (list) => { setStores(list); storage.set('stores:list', list); };
+  useEffect(()=>{
+    const unsub = watchStores(
+      (list)=>{ setStores(list); setStoresLoaded(true); setConnError(false); },
+      ()=>{ setConnError(true); }
+    );
+    return unsub;
+  },[]);
+
   const handleCreate = (name) => {
-    const s = { id: uid(), name };
-    persistStores([...stores, s]);
+    const id = uid();
+    createStoreDoc(id, name).catch(()=>setConnError(true));
   };
   const handleDelete = (id) => {
-    persistStores(stores.filter(s=>s.id!==id));
-    storage.remove('store:'+id+':meta');
-    storage.remove('store:'+id+':pinterest');
-    storage.remove('store:'+id+':orders');
+    deleteStoreDoc(id).catch(()=>setConnError(true));
     idbGetAll().then(all => { all.filter(r=>r.storeId===id).forEach(r => idbDelete(r.id)); });
     if (currentStoreId===id) setCurrentStoreId(null);
   };
 
   if (!currentStoreId) {
-    return <StorePicker stores={stores} onSelect={setCurrentStoreId} onCreate={handleCreate} onDelete={handleDelete} />;
+    return <StorePicker stores={stores} loaded={storesLoaded} connError={connError} onSelect={setCurrentStoreId} onCreate={handleCreate} onDelete={handleDelete} />;
   }
   const store = stores.find(s=>s.id===currentStoreId);
   return <Workspace key={currentStoreId} storeId={currentStoreId} storeName={store ? store.name : ''} onBack={()=>setCurrentStoreId(null)} />;
