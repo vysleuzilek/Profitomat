@@ -39,6 +39,50 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 try { db.enablePersistence({ synchronizeTabs: true }); } catch(e) {}
 
+// IndexedDB for invoice PDFs (kept local per device — no cloud file storage set up)
+const IDB_NAME = 'profitomat-files';
+const IDB_STORE = 'invoices';
+function idbOpen(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const idb = req.result;
+      if (!idb.objectStoreNames.contains(IDB_STORE)) {
+        idb.createObjectStore(IDB_STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbAdd(record){
+  const idb = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).add(record);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGetAll(){
+  const idb = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = idb.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbDelete(id){
+  const idb = await idbOpen();
+  return new Promise((resolve, reject)=>{
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 function storesCollection(){ return db.collection('stores'); }
 function watchStores(onData, onError){
   return storesCollection().onSnapshot(snap=>{
@@ -89,50 +133,6 @@ const storage = {
   set(key, val){ try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch(e){ return false; } },
   remove(key){ try { localStorage.removeItem(key); } catch(e){} }
 };
-
-// IndexedDB for invoice PDFs (holds much more data than localStorage)
-const IDB_NAME = 'profitomat-files';
-const IDB_STORE = 'invoices';
-function idbOpen(){
-  return new Promise((resolve, reject)=>{
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(IDB_STORE)) {
-        db.createObjectStore(IDB_STORE, { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function idbAdd(record){
-  const db = await idbOpen();
-  return new Promise((resolve, reject)=>{
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).add(record);
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function idbGetAll(){
-  const db = await idbOpen();
-  return new Promise((resolve, reject)=>{
-    const tx = db.transaction(IDB_STORE, 'readonly');
-    const req = tx.objectStore(IDB_STORE).getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function idbDelete(id){
-  const db = await idbOpen();
-  return new Promise((resolve, reject)=>{
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).delete(id);
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
 
 const inputStyle = { background: T.surfaceAlt, border: '1px solid '+T.border, borderRadius: 6, color: T.text, fontFamily: fontMono, fontSize: 13, padding: '6px 8px', outline: 'none', width: '100%' };
 const numInputProps = { type: 'text', inputMode: 'decimal', autoComplete: 'off' };
@@ -256,50 +256,88 @@ function PeriodSummary({rows, fmt}){
 
 function MetaTab({data, setData}){
   const {settings, rows} = data;
-  const beroas = useMemo(()=>{ const price=toNum(settings.price), fc=toNum(settings.fulfillCost), of=toNum(settings.otherFees); const net = price - fc - of; return net>0 ? price/net : 0; },[settings]);
+  const products = settings.products || [];
+
   const computedRows = useMemo(()=>rows.map(r=>{
-    const units=toNum(r.units), adSpend=toNum(r.adSpend), price=toNum(settings.price), fc=toNum(settings.fulfillCost), of=toNum(settings.otherFees);
-    const revenue = units*price;
-    const fulfill = units*(fc+of);
+    const unitsMap = r.units || {};
+    let revenue = 0, fulfill = 0;
+    products.forEach(p=>{
+      const qty = toNum(unitsMap[p.id]);
+      revenue += qty * toNum(p.price);
+      fulfill += qty * (toNum(p.fulfillCost) + toNum(p.otherFees));
+    });
+    const adSpend = toNum(r.adSpend);
     const profit = revenue - fulfill - adSpend;
     const roas = adSpend>0 ? revenue/adSpend : 0;
-    return {...r, revenue, fulfill, profit, roas, adSpendNum:adSpend, unitsNum:units};
-  }),[rows,settings]);
+    const rowBeroas = revenue > fulfill ? revenue/(revenue-fulfill) : Infinity;
+    const anyUnits = products.some(p=>toNum(unitsMap[p.id])>0);
+    return {...r, revenue, fulfill, profit, roas, rowBeroas, adSpendNum:adSpend, anyUnits};
+  }),[rows,products]);
+
   const totals = useMemo(()=>{
     const totalProfit = computedRows.reduce((s,r)=>s+r.profit,0);
     const totalRevenue = computedRows.reduce((s,r)=>s+r.revenue,0);
+    const totalFulfill = computedRows.reduce((s,r)=>s+r.fulfill,0);
     const totalSpend = computedRows.reduce((s,r)=>s+r.adSpendNum,0);
-    const activeDays = computedRows.filter(r=>r.adSpendNum>0||r.unitsNum>0).length;
-    return { totalProfit, totalRevenue, totalSpend,
+    const activeDays = computedRows.filter(r=>r.adSpendNum>0||r.anyUnits).length;
+    const blendedBeroas = totalRevenue > totalFulfill ? totalRevenue/(totalRevenue-totalFulfill) : 0;
+    return { totalProfit, totalRevenue, totalSpend, blendedBeroas,
       blendedRoas: totalSpend>0?totalRevenue/totalSpend:0,
       marginPct: totalRevenue>0?(totalProfit/totalRevenue)*100:0,
       avgDaily: activeDays>0?totalProfit/activeDays:0 };
   },[computedRows]);
+
   const maxAbsProfit = Math.max(1, ...computedRows.map(r=>Math.abs(r.profit)));
   const [showChart, setShowChart] = useState(false);
   const [showPeriod, setShowPeriod] = useState(false);
-  const updateSettings=(k,v)=>setData(d=>({...d,settings:{...d.settings,[k]:v}}));
+
+  const updateProduct=(id,k,v)=>setData(d=>({...d,settings:{...d.settings,products:d.settings.products.map(p=>p.id===id?{...p,[k]:v}:p)}}));
+  const addProduct=()=>setData(d=>({...d,settings:{...d.settings,products:[...d.settings.products,{id:uid(),name:'Nový produkt',price:'0',fulfillCost:'0',otherFees:'0'}]}}));
+  const removeProduct=(id)=>setData(d=>{
+    if (d.settings.products.length<=1) return d;
+    return {...d,
+      settings:{...d.settings,products:d.settings.products.filter(p=>p.id!==id)},
+      rows: d.rows.map(r=>{ const units={...(r.units||{})}; delete units[id]; return {...r, units}; })
+    };
+  });
   const updateRow=(id,k,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===id?{...r,[k]:v}:r)}));
-  const addRow=()=>setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:'0',adSpend:'0'}]}));
+  const updateUnit=(rowId,productId,v)=>setData(d=>({...d,rows:d.rows.map(r=>r.id===rowId?{...r,units:{...(r.units||{}),[productId]:v}}:r)}));
+  const addRow=()=>{
+    const unitsInit = {};
+    products.forEach(p=>{ unitsInit[p.id]='0'; });
+    setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:unitsInit,adSpend:'0'}]}));
+  };
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
 
-  const cw = { date:'20%', units:'8%', adSpend:'12%', revenue:'14%', fulfill:'14%', profit:'14%', roas:'12%', del:'6%' };
+  const fixedPct = 16+10+12+12+12+10+6; // date, adSpend, revenue, fulfill, profit, roas, del
+  const unitColPct = products.length>0 ? Math.max(8, (100-fixedPct)/products.length) : 0;
 
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
-      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Ekonomika produktu</div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:14}}>
-        <Field label="Cena produktu (Kč)"><input {...numInputProps} style={inputStyle} value={settings.price} onChange={e=>updateSettings('price',e.target.value)} /></Field>
-        <Field label="Fulfill náklady (Kč)"><input {...numInputProps} style={inputStyle} value={settings.fulfillCost} onChange={e=>updateSettings('fulfillCost',e.target.value)} /></Field>
-        <Field label="Ostatní poplatky (Kč)"><input {...numInputProps} style={inputStyle} value={settings.otherFees} onChange={e=>updateSettings('otherFees',e.target.value)} /></Field>
-        <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600}}>{beroas.toFixed(2)}</div></Field>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Produkty</div>
+      <div style={{display:'flex',flexDirection:'column',gap:10}}>
+        {products.map(p=>{
+          const price=toNum(p.price), fc=toNum(p.fulfillCost), of=toNum(p.otherFees);
+          const net = price-fc-of;
+          const pBeroas = net>0 ? price/net : 0;
+          return (<div key={p.id} style={{display:'grid',gridTemplateColumns:'1.3fr 1fr 1fr 1fr 0.8fr auto',gap:10,alignItems:'end'}}>
+            <Field label="Název"><input type="text" style={inputStyle} value={p.name} onChange={e=>updateProduct(p.id,'name',e.target.value)} /></Field>
+            <Field label="Cena (Kč)"><input {...numInputProps} style={inputStyle} value={p.price} onChange={e=>updateProduct(p.id,'price',e.target.value)} /></Field>
+            <Field label="Fulfill (Kč)"><input {...numInputProps} style={inputStyle} value={p.fulfillCost} onChange={e=>updateProduct(p.id,'fulfillCost',e.target.value)} /></Field>
+            <Field label="Poplatky (Kč)"><input {...numInputProps} style={inputStyle} value={p.otherFees} onChange={e=>updateProduct(p.id,'otherFees',e.target.value)} /></Field>
+            <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600,textAlign:'center'}}>{pBeroas.toFixed(2)}</div></Field>
+            <IconBtn onClick={()=>removeProduct(p.id)} title="Odebrat produkt" danger>✕</IconBtn>
+          </div>);
+        })}
       </div>
+      <div style={{marginTop:12}}><AddBtn onClick={addProduct} label="Přidat produkt" accent={T.meta} /></div>
     </div>
+
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
       <MetricCard label="Total profit" value={fmtKc(totals.totalProfit)} tone={totals.totalProfit>=0?'positive':'negative'} />
       <MetricCard label="Total revenue" value={fmtKc(totals.totalRevenue)} />
       <MetricCard label="Total ad spend" value={fmtKc(totals.totalSpend)} />
-      <MetricCard label="Blended ROAS" value={totals.blendedRoas.toFixed(2)} sub={"Break-even: "+beroas.toFixed(2)} tone={totals.blendedRoas>=beroas?'positive':'negative'} />
+      <MetricCard label="Blended ROAS" value={totals.blendedRoas.toFixed(2)} sub={"Break-even: "+totals.blendedBeroas.toFixed(2)} tone={totals.blendedRoas>=totals.blendedBeroas?'positive':'negative'} />
       <MetricCard label="Profit margin" value={fmtPct(totals.marginPct)} />
       <MetricCard label="Ø denní profit" value={fmtKc(totals.avgDaily)} tone={totals.avgDaily>=0?'positive':'negative'} />
     </div>
@@ -312,23 +350,29 @@ function MetaTab({data, setData}){
     {showPeriod && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><PeriodSummary rows={computedRows} fmt={fmtKc} /></div>}
 
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640,tableLayout:'fixed'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640+products.length*90,tableLayout:'fixed'}}>
         <thead><tr style={{background:T.surface}}>
-          <th style={{width:cw.date,textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Datum</th>
-          <th style={{width:cw.units,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ks</th>
-          <th style={{width:cw.adSpend,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ad spend</th>
-          <th style={{width:cw.revenue,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Revenue</th>
-          <th style={{width:cw.fulfill,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Fulfill</th>
-          <th style={{width:cw.profit,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Profit</th>
-          <th style={{width:cw.roas,textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>ROAS</th>
-          <th style={{width:cw.del,borderBottom:'1px solid '+T.border}}></th>
+          <th style={{width:'16%',textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Datum</th>
+          {products.map(p=>(
+            <th key={p.id} style={{width:unitColPct+'%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>Ks: {p.name}</th>
+          ))}
+          <th style={{width:'10%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ad spend</th>
+          <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Revenue</th>
+          <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Fulfill</th>
+          <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Profit</th>
+          <th style={{width:'10%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>ROAS</th>
+          <th style={{width:'6%',borderBottom:'1px solid '+T.border}}></th>
         </tr></thead>
         <tbody>
-          {computedRows.length===0 && <tr><td colSpan={8} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
+          {computedRows.length===0 && <tr><td colSpan={products.length+7} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
           {computedRows.map((r,i)=>(
             <tr key={r.id}>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={inputStyle} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.units} onChange={e=>updateRow(r.id,'units',e.target.value)} /></td>
+              {products.map(p=>(
+                <td key={p.id} style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}>
+                  <input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={(r.units||{})[p.id] ?? '0'} onChange={e=>updateUnit(r.id,p.id,e.target.value)} />
+                </td>
+              ))}
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.revenue)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.fulfill)}</td>
@@ -336,7 +380,7 @@ function MetaTab({data, setData}){
                 <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtKc(r.profit)}</span>
               </td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=beroas?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:r.roas>=r.rowBeroas?T.positive:T.textMuted}}>{r.roas.toFixed(2)}</td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>deleteRow(r.id)} title="Smazat řádek" danger>✕</IconBtn></td>
             </tr>
           ))}
@@ -513,7 +557,7 @@ function OrdersTab({data, setData}){
   </div>);
 }
 
-// ---------- INVOICES TAB (PDF uploads, stored per device in IndexedDB) ----------
+// ---------- INVOICES TAB (PDF uploads, stored locally per device via IndexedDB) ----------
 
 function InvoicesTab({storeId}){
   const [invoices, setInvoices] = useState([]);
@@ -522,11 +566,12 @@ function InvoicesTab({storeId}){
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(todayISO());
   const [error, setError] = useState('');
+  const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
 
   const reload = async () => {
     const all = await idbGetAll();
-    setInvoices(all.filter(r=>r.storeId===storeId).sort((a,b)=> b.date.localeCompare(a.date)));
+    setInvoices(all.filter(r=>r.storeId===storeId).sort((a,b)=> (b.date||'').localeCompare(a.date||'')));
   };
   useEffect(()=>{ reload().then(()=>setLoaded(true)); },[storeId]);
 
@@ -534,18 +579,24 @@ function InvoicesTab({storeId}){
     if (!pendingFile) { setError('Nejdřív vyber PDF soubor.'); return; }
     if (toNum(amount) <= 0) { setError('Zadej částku faktury.'); return; }
     setError('');
-    const record = {
-      id: uid(), storeId, fileName: pendingFile.name, fileType: pendingFile.type,
-      size: pendingFile.size, amount: toNum(amount), date, blob: pendingFile,
-    };
-    await idbAdd(record);
-    setPendingFile(null); setAmount(''); setDate(todayISO());
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    reload();
+    setUploading(true);
+    try {
+      const record = {
+        id: uid(), storeId, fileName: pendingFile.name, fileType: pendingFile.type,
+        size: pendingFile.size, amount: toNum(amount), date, blob: pendingFile,
+      };
+      await idbAdd(record);
+      setPendingFile(null); setAmount(''); setDate(todayISO());
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      await reload();
+    } catch(e) {
+      setError('Uložení se nepovedlo, zkus to znovu.');
+    }
+    setUploading(false);
   };
-  const handleDelete = async (id) => { await idbDelete(id); reload(); };
-  const handleView = (record) => {
-    const url = URL.createObjectURL(record.blob);
+  const handleDelete = async (inv) => { await idbDelete(inv.id); reload(); };
+  const handleView = (inv) => {
+    const url = URL.createObjectURL(inv.blob);
     window.open(url, '_blank');
     setTimeout(()=>URL.revokeObjectURL(url), 60000);
   };
@@ -554,11 +605,11 @@ function InvoicesTab({storeId}){
     const now = new Date();
     const yearStr = String(now.getFullYear());
     const monthStr = yearStr+'-'+String(now.getMonth()+1).padStart(2,'0');
-    const totalYear = invoices.filter(r=>r.date.startsWith(yearStr)).reduce((s,r)=>s+r.amount,0);
-    const totalMonth = invoices.filter(r=>r.date.startsWith(monthStr)).reduce((s,r)=>s+r.amount,0);
-    const totalAll = invoices.reduce((s,r)=>s+r.amount,0);
+    const totalYear = invoices.filter(r=>(r.date||'').startsWith(yearStr)).reduce((s,r)=>s+toNum(r.amount),0);
+    const totalMonth = invoices.filter(r=>(r.date||'').startsWith(monthStr)).reduce((s,r)=>s+toNum(r.amount),0);
+    const totalAll = invoices.reduce((s,r)=>s+toNum(r.amount),0);
     const byMonth = {};
-    invoices.forEach(r=>{ const m = r.date.slice(0,7); byMonth[m] = (byMonth[m]||0) + r.amount; });
+    invoices.forEach(r=>{ const m = (r.date||'').slice(0,7); if(!m) return; byMonth[m] = (byMonth[m]||0) + toNum(r.amount); });
     const monthRows = Object.entries(byMonth).sort((a,b)=> b[0].localeCompare(a[0]));
     return { totalYear, totalMonth, totalAll, count: invoices.length, monthRows };
   },[invoices]);
@@ -568,14 +619,14 @@ function InvoicesTab({storeId}){
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Přidat fakturu</div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:14,alignItems:'end'}}>
         <Field label="PDF soubor">
-          <input ref={fileInputRef} type="file" accept="application/pdf" style={{...inputStyle,padding:'5px 8px'}} onChange={e=>setPendingFile(e.target.files[0]||null)} />
+          <input ref={fileInputRef} type="file" accept="application/pdf" style={{...inputStyle,padding:'5px 8px'}} onChange={e=>setPendingFile(e.target.files[0]||null)} disabled={uploading} />
         </Field>
-        <Field label="Datum"><input type="date" style={inputStyle} value={date} onChange={e=>setDate(e.target.value)} /></Field>
-        <Field label="Částka (Kč)"><input {...numInputProps} style={inputStyle} placeholder="0" value={amount} onChange={e=>setAmount(e.target.value)} /></Field>
-        <button onClick={handleAdd} style={{background:T.invoice,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer',height:36}}>Přidat fakturu</button>
+        <Field label="Datum"><input type="date" style={inputStyle} value={date} onChange={e=>setDate(e.target.value)} disabled={uploading} /></Field>
+        <Field label="Částka (Kč)"><input {...numInputProps} style={inputStyle} placeholder="0" value={amount} onChange={e=>setAmount(e.target.value)} disabled={uploading} /></Field>
+        <button onClick={handleAdd} disabled={uploading} style={{background:T.invoice,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:uploading?'default':'pointer',height:36,opacity:uploading?0.6:1}}>{uploading?'Nahrávám…':'Přidat fakturu'}</button>
       </div>
       {error && <div style={{color:T.negative,fontSize:13,marginTop:10,fontFamily:fontBody}}>{error}</div>}
-      {pendingFile && !error && <div style={{color:T.textMuted,fontSize:12,marginTop:10,fontFamily:fontBody}}>Vybráno: {pendingFile.name}</div>}
+      {pendingFile && !error && !uploading && <div style={{color:T.textMuted,fontSize:12,marginTop:10,fontFamily:fontBody}}>Vybráno: {pendingFile.name}</div>}
     </div>
 
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:18}}>
@@ -621,7 +672,7 @@ function InvoicesTab({storeId}){
                 <button onClick={()=>handleView(r)} style={{background:'transparent',border:'none',color:T.invoice,cursor:'pointer',fontFamily:fontBody,fontSize:13,padding:0,textDecoration:'underline',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis'}}>{r.fileName}</button>
               </td>
               <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,fontWeight:600}}>{fmtKc(r.amount)}</td>
-              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>handleDelete(r.id)} title="Smazat fakturu" danger>✕</IconBtn></td>
+              <td style={{padding:'8px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'center'}}><IconBtn onClick={()=>handleDelete(r)} title="Smazat fakturu" danger>✕</IconBtn></td>
             </tr>
           ))}
         </tbody>
@@ -665,9 +716,25 @@ function StorePicker({stores, loaded, connError, onSelect, onCreate, onDelete}){
 
 // ---------- WORKSPACE (per-store) ----------
 
-const DEFAULT_META = { settings: { price: '999', fulfillCost: '300', otherFees: '20' }, rows: [] };
+const DEFAULT_META = { settings: { products: [{ id: 'p1', name: 'Produkt', price: '999', fulfillCost: '300', otherFees: '20' }] }, rows: [] };
 const DEFAULT_PIN = { settings: { margin: '62' }, rows: [] };
 const DEFAULT_ORDERS = { settings: { kurzEur: '24.2', kurzUsd: '21' }, rows: [] };
+
+// Migrates old single-product meta data (settings.price/fulfillCost/otherFees, row.units as a plain number)
+// into the new multi-product shape (settings.products[], row.units as {productId: qty}).
+function migrateMetaData(data){
+  if (data && data.settings && Array.isArray(data.settings.products)) return data;
+  const legacy = (data && data.settings) || {};
+  const product = {
+    id: 'p1', name: 'Produkt',
+    price: legacy.price ?? '999', fulfillCost: legacy.fulfillCost ?? '300', otherFees: legacy.otherFees ?? '20',
+  };
+  const rows = ((data && data.rows) || []).map(r => ({
+    id: r.id, date: r.date, adSpend: r.adSpend,
+    units: { p1: (r.units!==undefined ? r.units : '0') },
+  }));
+  return { settings: { products: [product] }, rows };
+}
 
 function Workspace({storeId, storeName, onBack}){
   const [tab, setTab] = useState('meta');
@@ -681,7 +748,7 @@ function Workspace({storeId, storeName, onBack}){
   useEffect(()=>{
     setLoaded(false);
     const unsub = watchStoreData(storeId, (data)=>{
-      if (data.meta) setMetaData(data.meta);
+      if (data.meta) setMetaData(migrateMetaData(data.meta));
       if (data.pinterest) setPinData(data.pinterest);
       if (data.orders) setOrdersData(data.orders);
       setLoaded(true);
