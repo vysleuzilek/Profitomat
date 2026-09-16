@@ -158,6 +158,13 @@ function matchProduct(products, title, sku){
   return null;
 }
 
+function parseCzkAmount(s){
+  if (!s) return 0;
+  const m = String(s).match(/[\d.,]+/);
+  if (!m) return 0;
+  return parseFloat(m[0].replace(',','.')) || 0;
+}
+
 function processTeemDropImport(jsonRows, products, alreadyImportedIds){
   const seen = new Set(alreadyImportedIds || []);
   const orders = {};
@@ -167,7 +174,7 @@ function processTeemDropImport(jsonRows, products, alreadyImportedIds){
     if (!orders[orderNo]) {
       orders[orderNo] = {
         date: parseTeemDropDate(row['Your Order Time']),
-        shippingUsd: toNum(row['Shipping Cost($)']) + toNum(row['VAT($)']),
+        fulfillUsd: toNum(row['TD Amount($)']),
         items: [],
       };
     }
@@ -175,7 +182,7 @@ function processTeemDropImport(jsonRows, products, alreadyImportedIds){
       title: row['Store Product Title'] || row['TD Product Name'] || '',
       sku: row['TD SKU'] || '',
       qty: toNum(row['Quantity']),
-      unitPriceUsd: toNum(row['TD Unit Price($)']),
+      revenueCzk: parseCzkAmount(row['Store Amount']) * toNum(row['Quantity']),
     });
   });
 
@@ -185,24 +192,19 @@ function processTeemDropImport(jsonRows, products, alreadyImportedIds){
 
   const byDate = {};
   const unmatched = [];
-  const priceObs = {}; // productId -> {sum, count}
   const allDates = allOrderIds.map(id=>orders[id].date).filter(Boolean);
 
   newOrderIds.forEach(id=>{
     const order = orders[id];
     if (!order.date) return;
-    if (!byDate[order.date]) byDate[order.date] = { units:{}, shippingUsd:0, orderCount:0 };
-    byDate[order.date].shippingUsd += order.shippingUsd;
+    if (!byDate[order.date]) byDate[order.date] = { units:{}, revenueCzk:0, fulfillUsd:0, orderCount:0 };
+    byDate[order.date].fulfillUsd += order.fulfillUsd;
     byDate[order.date].orderCount += 1;
     order.items.forEach(item=>{
+      byDate[order.date].revenueCzk += item.revenueCzk;
       const p = matchProduct(products, item.title, item.sku);
       if (p) {
         byDate[order.date].units[p.id] = (byDate[order.date].units[p.id]||0) + item.qty;
-        if (item.unitPriceUsd>0) {
-          if (!priceObs[p.id]) priceObs[p.id] = { sum:0, count:0 };
-          priceObs[p.id].sum += item.unitPriceUsd;
-          priceObs[p.id].count += 1;
-        }
       } else if (item.title) {
         unmatched.push(item.title+' ('+item.qty+' ks)');
       }
@@ -217,15 +219,12 @@ function processTeemDropImport(jsonRows, products, alreadyImportedIds){
     const end = new Date(maxDate+'T00:00:00');
     while (d.getTime()<=end.getTime()) {
       const iso = d.toISOString().slice(0,10);
-      if (!byDate[iso]) byDate[iso] = { units:{}, shippingUsd:0, orderCount:0 };
+      if (!byDate[iso]) byDate[iso] = { units:{}, revenueCzk:0, fulfillUsd:0, orderCount:0 };
       d.setDate(d.getDate()+1);
     }
   }
 
-  const avgUnitPrices = {};
-  Object.entries(priceObs).forEach(([pid,o])=>{ avgUnitPrices[pid] = o.sum/o.count; });
-
-  return { byDate, unmatched, newOrderIds, skippedCount, avgUnitPrices };
+  return { byDate, unmatched, newOrderIds, skippedCount };
 }
 
 const storage = {
@@ -385,17 +384,14 @@ function ImportPanel({products, importedOrderIds, onApply, onClose}){
 
   const dateRows = preview ? Object.entries(preview.byDate).sort((a,b)=>a[0].localeCompare(b[0])) : [];
   const productById = {}; products.forEach(p=>{ productById[p.id]=p; });
-  const priceCorrections = preview ? Object.entries(preview.avgUnitPrices).map(([pid,avgUsd])=>{
-    const p = productById[pid];
-    if (!p) return null;
-    const newKc = avgUsd*toNum(rate);
-    return { name: p.name, oldKc: toNum(p.fulfillCost), newKc };
-  }).filter(Boolean) : [];
 
   return (<div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
       <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint}}>Import objednávek z TeemDropu</div>
       <IconBtn onClick={onClose} title="Zavřít">✕</IconBtn>
+    </div>
+    <div style={{fontSize:12,color:T.textFaint,fontFamily:fontBody,marginBottom:14}}>
+      Revenue se vezme z "Store Amount" (skutečná prodejní cena) a Fulfill z "TD Amount" (skutečný celkový náklad objednávky – produkt, doprava i DPH dohromady). Kurz níž se použije jen na přepočet Fulfill z dolarů.
     </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:14,alignItems:'end',marginBottom:preview||error?16:0}}>
       <Field label="Export soubor (.xlsx)">
@@ -409,20 +405,13 @@ function ImportPanel({products, importedOrderIds, onApply, onClose}){
       <div style={{fontSize:13,color:T.textMuted,fontFamily:fontBody,marginBottom:10}}>
         Nových objednávek: {preview.newOrderIds.length}{preview.skippedCount>0 ? (' · už dříve importováno: '+preview.skippedCount+' (přeskočeno)') : ''} · dní v přehledu: {dateRows.length}
       </div>
-      {priceCorrections.length>0 && (
-        <div style={{background:T.surfaceAlt,border:'1px solid '+T.borderSoft,borderRadius:8,padding:'10px 12px',marginBottom:12,fontSize:13,fontFamily:fontBody}}>
-          <div style={{color:T.textFaint,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:6}}>Oprava nákladů za kus podle reálných dat</div>
-          {priceCorrections.map(c=>(
-            <div key={c.name} style={{color:T.textMuted}}>{c.name}: {fmtKc(c.oldKc)} → <span style={{color:T.paprika,fontWeight:600}}>{fmtKc(c.newKc)}</span></div>
-          ))}
-        </div>
-      )}
       <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:8,marginBottom:10}}>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr style={{background:T.surfaceAlt}}>
             <th style={{textAlign:'left',padding:'8px 10px',fontFamily:fontBody,fontSize:11,color:T.textFaint}}>Datum</th>
             <th style={{textAlign:'left',padding:'8px 10px',fontFamily:fontBody,fontSize:11,color:T.textFaint}}>Produkty</th>
-            <th style={{textAlign:'right',padding:'8px 10px',fontFamily:fontBody,fontSize:11,color:T.textFaint}}>Doprava+DPH</th>
+            <th style={{textAlign:'right',padding:'8px 10px',fontFamily:fontBody,fontSize:11,color:T.textFaint}}>Revenue</th>
+            <th style={{textAlign:'right',padding:'8px 10px',fontFamily:fontBody,fontSize:11,color:T.textFaint}}>Fulfill</th>
           </tr></thead>
           <tbody>
             {dateRows.map(([date, agg])=>(
@@ -431,7 +420,8 @@ function ImportPanel({products, importedOrderIds, onApply, onClose}){
                 <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,fontFamily:fontBody,fontSize:13,color:T.textMuted}}>
                   {Object.keys(agg.units).length>0 ? Object.entries(agg.units).map(([pid,qty])=> (productById[pid]?productById[pid].name:'?')+': '+qty).join(', ') : '—'}
                 </td>
-                <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13}}>{agg.shippingUsd>0 ? fmtKc(Math.round(agg.shippingUsd*toNum(rate)*100)/100) : '—'}</td>
+                <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13}}>{agg.revenueCzk>0 ? fmtKc(agg.revenueCzk) : '—'}</td>
+                <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13}}>{agg.fulfillUsd>0 ? fmtKc(Math.round(agg.fulfillUsd*toNum(rate)*100)/100) : '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -443,7 +433,7 @@ function ImportPanel({products, importedOrderIds, onApply, onClose}){
         </div>
       )}
       <div style={{display:'flex',gap:10}}>
-        <button onClick={()=>onApply(preview.byDate, toNum(rate), preview.avgUnitPrices, preview.newOrderIds)} style={{background:T.meta,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Potvrdit import ({dateRows.length} {dateRows.length===1?'den':'dní'})</button>
+        <button onClick={()=>onApply(preview.byDate, toNum(rate), preview.newOrderIds)} style={{background:T.meta,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Potvrdit import ({dateRows.length} {dateRows.length===1?'den':'dní'})</button>
         <button onClick={onClose} style={{background:'transparent',border:'1px solid '+T.border,borderRadius:8,color:T.textMuted,fontFamily:fontBody,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Zrušit</button>
       </div>
     </div>)}
@@ -457,19 +447,13 @@ function MetaTab({data, setData}){
   const products = settings.products || [];
 
   const computedRows = useMemo(()=>rows.map(r=>{
-    const unitsMap = r.units || {};
-    let revenue = 0, fulfill = 0;
-    products.forEach(p=>{
-      const qty = toNum(unitsMap[p.id]);
-      revenue += qty * toNum(p.price);
-      fulfill += qty * (toNum(p.fulfillCost) + toNum(p.otherFees));
-    });
-    const shipping = toNum(r.shipping);
-    fulfill += shipping;
+    const revenue = toNum(r.revenue);
+    const fulfill = toNum(r.fulfill);
     const adSpend = toNum(r.adSpend);
     const profit = revenue - fulfill - adSpend;
     const roas = adSpend>0 ? revenue/adSpend : 0;
     const rowBeroas = revenue > fulfill ? revenue/(revenue-fulfill) : Infinity;
+    const unitsMap = r.units || {};
     const anyUnits = products.some(p=>toNum(unitsMap[p.id])>0);
     return {...r, revenue, fulfill, profit, roas, rowBeroas, adSpendNum:adSpend, anyUnits};
   }),[rows,products]);
@@ -479,7 +463,7 @@ function MetaTab({data, setData}){
     const totalRevenue = computedRows.reduce((s,r)=>s+r.revenue,0);
     const totalFulfill = computedRows.reduce((s,r)=>s+r.fulfill,0);
     const totalSpend = computedRows.reduce((s,r)=>s+r.adSpendNum,0);
-    const activeDays = computedRows.filter(r=>r.adSpendNum>0||r.anyUnits).length;
+    const activeDays = computedRows.filter(r=>r.adSpendNum>0||r.anyUnits||r.revenue>0).length;
     const blendedBeroas = totalRevenue > totalFulfill ? totalRevenue/(totalRevenue-totalFulfill) : 0;
     return { totalProfit, totalRevenue, totalSpend, blendedBeroas,
       blendedRoas: totalSpend>0?totalRevenue/totalSpend:0,
@@ -494,41 +478,38 @@ function MetaTab({data, setData}){
 
   const round2 = (n) => Math.round(n*100)/100;
 
-  const applyImport = (byDate, rate, avgUnitPrices, newOrderIds) => {
+  const applyImport = (byDate, rate, newOrderIds) => {
     setData(d=>{
       let newRows = [...d.rows];
       Object.entries(byDate).forEach(([date, agg])=>{
-        const shippingKc = round2(agg.shippingUsd * rate);
+        const fulfillKc = round2(agg.fulfillUsd * rate);
+        const revenueKc = round2(agg.revenueCzk);
         const idx = newRows.findIndex(r=>r.date===date);
         if (idx>=0) {
           const existing = newRows[idx];
           const mergedUnits = {...(existing.units||{})};
           Object.entries(agg.units).forEach(([pid,qty])=>{ mergedUnits[pid] = toNum(mergedUnits[pid]) + qty; });
-          newRows[idx] = {...existing, units: mergedUnits, shipping: String(round2(toNum(existing.shipping) + shippingKc))};
+          newRows[idx] = {...existing, units: mergedUnits,
+            revenue: String(round2(toNum(existing.revenue) + revenueKc)),
+            fulfill: String(round2(toNum(existing.fulfill) + fulfillKc))};
         } else {
           const units = {};
           d.settings.products.forEach(p=>{ units[p.id] = String(agg.units[p.id]||0); });
-          newRows.push({ id: uid(), date, units, adSpend:'0', shipping: String(shippingKc) });
+          newRows.push({ id: uid(), date, units, adSpend:'0', revenue:String(revenueKc), fulfill:String(fulfillKc) });
         }
       });
       newRows.sort((a,b)=>a.date.localeCompare(b.date));
 
-      const correctedProducts = d.settings.products.map(p=>{
-        const avgUsd = avgUnitPrices ? avgUnitPrices[p.id] : undefined;
-        if (avgUsd) return {...p, fulfillCost: String(round2(avgUsd*rate))};
-        return p;
-      });
-
       const prevIds = d.settings.importedOrderIds || [];
       const updatedIds = [...prevIds, ...(newOrderIds||[])];
 
-      return {...d, rows: newRows, settings: {...d.settings, products: correctedProducts, importedOrderIds: updatedIds}};
+      return {...d, rows: newRows, settings: {...d.settings, importedOrderIds: updatedIds}};
     });
     setShowImport(false);
   };
 
   const updateProduct=(id,k,v)=>setData(d=>({...d,settings:{...d.settings,products:d.settings.products.map(p=>p.id===id?{...p,[k]:v}:p)}}));
-  const addProduct=()=>setData(d=>({...d,settings:{...d.settings,products:[...d.settings.products,{id:uid(),name:'Nový produkt',price:'0',fulfillCost:'0',otherFees:'0'}]}}));
+  const addProduct=()=>setData(d=>({...d,settings:{...d.settings,products:[...d.settings.products,{id:uid(),name:'Nový produkt'}]}}));
   const removeProduct=(id)=>setData(d=>{
     if (d.settings.products.length<=1) return d;
     return {...d,
@@ -541,30 +522,24 @@ function MetaTab({data, setData}){
   const addRow=()=>{
     const unitsInit = {};
     products.forEach(p=>{ unitsInit[p.id]='0'; });
-    setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:unitsInit,adSpend:'0',shipping:'0'}]}));
+    setData(d=>({...d,rows:[...d.rows,{id:uid(),date:todayISO(),units:unitsInit,adSpend:'0',revenue:'0',fulfill:'0'}]}));
   };
   const deleteRow=(id)=>setData(d=>({...d,rows:d.rows.filter(r=>r.id!==id)}));
 
-  const fixedPct = 14+10+10+12+12+12+10+6; // date, adSpend, shipping, revenue, fulfill, profit, roas, del
+  const fixedPct = 14+10+12+12+12+10+6; // date, adSpend, revenue, fulfill, profit, roas, del
   const unitColPct = products.length>0 ? Math.max(8, (100-fixedPct)/products.length) : 0;
 
   return (<div>
     <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
-      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:12}}>Produkty</div>
+      <div style={{fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,marginBottom:4}}>Produkty</div>
+      <div style={{fontSize:12,color:T.textFaint,fontFamily:fontBody,marginBottom:12}}>Jen pro párování při importu a přehled kusů — Revenue a Fulfill se počítají z reálných čísel v denní tabulce, ne odsud.</div>
       <div style={{display:'flex',flexDirection:'column',gap:10}}>
-        {products.map(p=>{
-          const price=toNum(p.price), fc=toNum(p.fulfillCost), of=toNum(p.otherFees);
-          const net = price-fc-of;
-          const pBeroas = net>0 ? price/net : 0;
-          return (<div key={p.id} style={{display:'grid',gridTemplateColumns:'1.3fr 1fr 1fr 1fr 0.8fr auto',gap:10,alignItems:'end'}}>
-            <Field label="Název"><input type="text" style={inputStyle} value={p.name} onChange={e=>updateProduct(p.id,'name',e.target.value)} /></Field>
-            <Field label="Cena (Kč)"><input {...numInputProps} style={inputStyle} value={p.price} onChange={e=>updateProduct(p.id,'price',e.target.value)} /></Field>
-            <Field label="Fulfill (Kč)"><input {...numInputProps} style={inputStyle} value={p.fulfillCost} onChange={e=>updateProduct(p.id,'fulfillCost',e.target.value)} /></Field>
-            <Field label="Poplatky (Kč)"><input {...numInputProps} style={inputStyle} value={p.otherFees} onChange={e=>updateProduct(p.id,'otherFees',e.target.value)} /></Field>
-            <Field label="BEROAS"><div style={{...inputStyle,background:'transparent',border:'1px solid '+T.borderSoft,color:T.paprika,fontWeight:600,textAlign:'center'}}>{pBeroas.toFixed(2)}</div></Field>
+        {products.map(p=>(
+          <div key={p.id} style={{display:'flex',gap:10,alignItems:'end'}}>
+            <div style={{flex:1}}><Field label="Název"><input type="text" style={inputStyle} value={p.name} onChange={e=>updateProduct(p.id,'name',e.target.value)} /></Field></div>
             <IconBtn onClick={()=>removeProduct(p.id)} title="Odebrat produkt" danger>✕</IconBtn>
-          </div>);
-        })}
+          </div>
+        ))}
       </div>
       <div style={{marginTop:12}}><AddBtn onClick={addProduct} label="Přidat produkt" accent={T.meta} /></div>
     </div>
@@ -588,14 +563,13 @@ function MetaTab({data, setData}){
     {showImport && <ImportPanel products={products} importedOrderIds={settings.importedOrderIds || []} onApply={applyImport} onClose={()=>setShowImport(false)} />}
 
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:680+products.length*90,tableLayout:'fixed'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:640+products.length*90,tableLayout:'fixed'}}>
         <thead><tr style={{background:T.surface}}>
           <th style={{width:'14%',textAlign:'left',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Datum</th>
           {products.map(p=>(
             <th key={p.id} style={{width:unitColPct+'%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>Ks: {p.name}</th>
           ))}
           <th style={{width:'10%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Ad spend</th>
-          <th style={{width:'10%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Doprava</th>
           <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Revenue</th>
           <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Fulfill</th>
           <th style={{width:'12%',textAlign:'right',padding:'10px 12px',fontFamily:fontBody,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',color:T.textFaint,borderBottom:'1px solid '+T.border}}>Profit</th>
@@ -603,7 +577,7 @@ function MetaTab({data, setData}){
           <th style={{width:'6%',borderBottom:'1px solid '+T.border}}></th>
         </tr></thead>
         <tbody>
-          {computedRows.length===0 && <tr><td colSpan={products.length+8} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den.</td></tr>}
+          {computedRows.length===0 && <tr><td colSpan={products.length+7} style={{padding:'28px 12px',textAlign:'center',color:T.textFaint,fontFamily:fontBody,fontSize:13}}>Zatím žádná data. Přidej první den nebo naimportuj export.</td></tr>}
           {computedRows.map((r,i)=>(
             <tr key={r.id}>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input type="date" style={inputStyle} value={r.date} onChange={e=>updateRow(r.id,'date',e.target.value)} /></td>
@@ -613,9 +587,8 @@ function MetaTab({data, setData}){
                 </td>
               ))}
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.adSpend} onChange={e=>updateRow(r.id,'adSpend',e.target.value)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.shipping ?? '0'} onChange={e=>updateRow(r.id,'shipping',e.target.value)} /></td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.revenue)}</td>
-              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13,color:T.textMuted}}>{fmtKc(r.fulfill)}</td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.revenue} onChange={e=>updateRow(r.id,'revenue',e.target.value)} /></td>
+              <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft}}><input {...numInputProps} style={{...inputStyle,textAlign:'right'}} value={r.fulfill} onChange={e=>updateRow(r.id,'fulfill',e.target.value)} /></td>
               <td style={{padding:'6px 12px',borderBottom:'1px solid '+T.borderSoft,textAlign:'right',position:'relative'}}>
                 <DataBar value={r.profit} max={maxAbsProfit} positive={r.profit>=0} />
                 <span style={{position:'relative',fontFamily:fontMono,fontSize:13,fontWeight:600,color:r.profit>=0?T.positive:T.negative}}>{fmtKc(r.profit)}</span>
@@ -956,24 +929,49 @@ function StorePicker({stores, loaded, connError, onSelect, onCreate, onDelete}){
 
 // ---------- WORKSPACE (per-store) ----------
 
-const DEFAULT_META = { settings: { products: [{ id: 'p1', name: 'Produkt', price: '999', fulfillCost: '300', otherFees: '20' }] }, rows: [] };
+const DEFAULT_META = { settings: { products: [{ id: 'p1', name: 'Produkt' }], importedOrderIds: [], __v: 2 }, rows: [] };
 const DEFAULT_PIN = { settings: { margin: '62' }, rows: [] };
 const DEFAULT_ORDERS = { settings: { kurzEur: '24.2', kurzUsd: '21' }, rows: [] };
 
-// Migrates old single-product meta data (settings.price/fulfillCost/otherFees, row.units as a plain number)
-// into the new multi-product shape (settings.products[], row.units as {productId: qty}).
+// Brings meta data up to the current shape (v2: rows store revenue/fulfill directly,
+// products are just names used for import matching). Handles the two older shapes:
+//  - super-legacy single product with settings.price/fulfillCost/otherFees, row.units as a plain number
+//  - intermediate multi-product with settings.products[].price/fulfillCost/otherFees + row.shipping
 function migrateMetaData(data){
-  if (data && data.settings && Array.isArray(data.settings.products)) return data;
-  const legacy = (data && data.settings) || {};
-  const product = {
-    id: 'p1', name: 'Produkt',
-    price: legacy.price ?? '999', fulfillCost: legacy.fulfillCost ?? '300', otherFees: legacy.otherFees ?? '20',
-  };
-  const rows = ((data && data.rows) || []).map(r => ({
-    id: r.id, date: r.date, adSpend: r.adSpend,
-    units: { p1: (r.units!==undefined ? r.units : '0') },
-  }));
-  return { settings: { products: [product] }, rows };
+  const rows0 = (data && data.rows) || [];
+  const isV2 = data && data.settings && data.settings.__v === 2;
+  if (isV2) {
+    return {
+      settings: { products: (data.settings.products||[]).map(p=>({id:p.id,name:p.name})), importedOrderIds: data.settings.importedOrderIds||[], __v: 2 },
+      rows: rows0,
+    };
+  }
+
+  let products;
+  if (data && data.settings && Array.isArray(data.settings.products)) {
+    products = data.settings.products;
+  } else {
+    const legacy = (data && data.settings) || {};
+    products = [{ id:'p1', name:'Produkt', price: legacy.price ?? '999', fulfillCost: legacy.fulfillCost ?? '300', otherFees: legacy.otherFees ?? '20' }];
+  }
+
+  const rows = rows0.map(r=>{
+    let unitsMap = r.units;
+    if (unitsMap===undefined || typeof unitsMap!=='object' || unitsMap===null) {
+      unitsMap = { p1: (r.units!==undefined ? r.units : '0') };
+    }
+    let revenue = 0, fulfill = 0;
+    products.forEach(p=>{
+      const qty = toNum(unitsMap[p.id]);
+      revenue += qty*toNum(p.price);
+      fulfill += qty*(toNum(p.fulfillCost)+toNum(p.otherFees));
+    });
+    fulfill += toNum(r.shipping);
+    return { id: r.id, date: r.date, units: unitsMap, adSpend: r.adSpend!==undefined?r.adSpend:'0', revenue: String(revenue), fulfill: String(fulfill) };
+  });
+
+  const newProducts = products.map(p=>({id:p.id, name:p.name}));
+  return { settings: { products: newProducts, importedOrderIds: (data&&data.settings&&data.settings.importedOrderIds)||[], __v: 2 }, rows };
 }
 
 function Workspace({storeId, storeName, onBack}){
