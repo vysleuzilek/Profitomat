@@ -354,7 +354,7 @@ function PeriodSummary({rows, fmt}){
 
 // ---------- IMPORT PANEL (TeemDrop .xlsx order export) ----------
 
-function ImportPanel({products, importedOrderIds, onApply, onClose}){
+function ImportPanel({products, importedOrderIds, onApply, onClose, onResetHistory}){
   const [rate, setRate] = useState('22');
   const [preview, setPreview] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -402,8 +402,11 @@ function ImportPanel({products, importedOrderIds, onApply, onClose}){
     {error && <div style={{color:T.negative,fontSize:13,marginTop:4,fontFamily:fontBody}}>{error}</div>}
 
     {preview && (<div style={{marginTop:4}}>
-      <div style={{fontSize:13,color:T.textMuted,fontFamily:fontBody,marginBottom:10}}>
-        Nových objednávek: {preview.newOrderIds.length}{preview.skippedCount>0 ? (' · už dříve importováno: '+preview.skippedCount+' (přeskočeno)') : ''} · dní v přehledu: {dateRows.length}
+      <div style={{fontSize:13,color:T.textMuted,fontFamily:fontBody,marginBottom:10,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <span>Nových objednávek: {preview.newOrderIds.length}{preview.skippedCount>0 ? (' · už dříve importováno: '+preview.skippedCount+' (přeskočeno)') : ''} · dní v přehledu: {dateRows.length}</span>
+        {preview.skippedCount>0 && (
+          <button onClick={onResetHistory} style={{background:'transparent',border:'1px solid '+T.border,borderRadius:6,color:T.negative,fontFamily:fontBody,fontSize:12,padding:'4px 10px',cursor:'pointer'}}>Vymazat historii importů</button>
+        )}
       </div>
       <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:8,marginBottom:10}}>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
@@ -508,6 +511,11 @@ function MetaTab({data, setData}){
     setShowImport(false);
   };
 
+  const resetImportHistory = () => {
+    setData(d=>({...d, settings: {...d.settings, importedOrderIds: []}}));
+    setShowImport(false);
+  };
+
   const updateProduct=(id,k,v)=>setData(d=>({...d,settings:{...d.settings,products:d.settings.products.map(p=>p.id===id?{...p,[k]:v}:p)}}));
   const addProduct=()=>setData(d=>({...d,settings:{...d.settings,products:[...d.settings.products,{id:uid(),name:'Nový produkt'}]}}));
   const removeProduct=(id)=>setData(d=>{
@@ -560,7 +568,7 @@ function MetaTab({data, setData}){
     </div>
     {showChart && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><ProfitChart rows={computedRows} fmt={fmtKc} /></div>}
     {showPeriod && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><PeriodSummary rows={computedRows} fmt={fmtKc} /></div>}
-    {showImport && <ImportPanel products={products} importedOrderIds={settings.importedOrderIds || []} onApply={applyImport} onClose={()=>setShowImport(false)} />}
+    {showImport && <ImportPanel products={products} importedOrderIds={settings.importedOrderIds || []} onApply={applyImport} onClose={()=>setShowImport(false)} onResetHistory={resetImportHistory} />}
 
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
       <table style={{width:'100%',borderCollapse:'collapse',minWidth:640+products.length*90,tableLayout:'fixed'}}>
