@@ -158,7 +158,8 @@ function matchProduct(products, title, sku){
   return null;
 }
 
-function processTeemDropImport(jsonRows, products){
+function processTeemDropImport(jsonRows, products, alreadyImportedIds){
+  const seen = new Set(alreadyImportedIds || []);
   const orders = {};
   jsonRows.forEach(row=>{
     const orderNo = row['TD Order Number'];
@@ -174,14 +175,22 @@ function processTeemDropImport(jsonRows, products){
       title: row['Store Product Title'] || row['TD Product Name'] || '',
       sku: row['TD SKU'] || '',
       qty: toNum(row['Quantity']),
+      unitPriceUsd: toNum(row['TD Unit Price($)']),
     });
   });
+
+  const allOrderIds = Object.keys(orders);
+  const newOrderIds = allOrderIds.filter(id=>!seen.has(id));
+  const skippedCount = allOrderIds.length - newOrderIds.length;
+
   const byDate = {};
   const unmatched = [];
-  let orderCount = 0;
-  Object.values(orders).forEach(order=>{
+  const priceObs = {}; // productId -> {sum, count}
+  const allDates = allOrderIds.map(id=>orders[id].date).filter(Boolean);
+
+  newOrderIds.forEach(id=>{
+    const order = orders[id];
     if (!order.date) return;
-    orderCount++;
     if (!byDate[order.date]) byDate[order.date] = { units:{}, shippingUsd:0, orderCount:0 };
     byDate[order.date].shippingUsd += order.shippingUsd;
     byDate[order.date].orderCount += 1;
@@ -189,12 +198,34 @@ function processTeemDropImport(jsonRows, products){
       const p = matchProduct(products, item.title, item.sku);
       if (p) {
         byDate[order.date].units[p.id] = (byDate[order.date].units[p.id]||0) + item.qty;
+        if (item.unitPriceUsd>0) {
+          if (!priceObs[p.id]) priceObs[p.id] = { sum:0, count:0 };
+          priceObs[p.id].sum += item.unitPriceUsd;
+          priceObs[p.id].count += 1;
+        }
       } else if (item.title) {
         unmatched.push(item.title+' ('+item.qty+' ks)');
       }
     });
   });
-  return { byDate, unmatched, orderCount };
+
+  // fill every day in the file's date range so gap days show as zero rows too
+  if (allDates.length>0) {
+    const minDate = allDates.reduce((a,b)=>a<b?a:b);
+    const maxDate = allDates.reduce((a,b)=>a>b?a:b);
+    let d = new Date(minDate+'T00:00:00');
+    const end = new Date(maxDate+'T00:00:00');
+    while (d.getTime()<=end.getTime()) {
+      const iso = d.toISOString().slice(0,10);
+      if (!byDate[iso]) byDate[iso] = { units:{}, shippingUsd:0, orderCount:0 };
+      d.setDate(d.getDate()+1);
+    }
+  }
+
+  const avgUnitPrices = {};
+  Object.entries(priceObs).forEach(([pid,o])=>{ avgUnitPrices[pid] = o.sum/o.count; });
+
+  return { byDate, unmatched, newOrderIds, skippedCount, avgUnitPrices };
 }
 
 const storage = {
@@ -324,7 +355,7 @@ function PeriodSummary({rows, fmt}){
 
 // ---------- IMPORT PANEL (TeemDrop .xlsx order export) ----------
 
-function ImportPanel({products, onApply, onClose}){
+function ImportPanel({products, importedOrderIds, onApply, onClose}){
   const [rate, setRate] = useState('22');
   const [preview, setPreview] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -339,9 +370,9 @@ function ImportPanel({products, onApply, onClose}){
         const wb = XLSX.read(e.target.result, {type:'array'});
         const ws = wb.Sheets[wb.SheetNames[0]];
         const json = XLSX.utils.sheet_to_json(ws, {defval:''});
-        const result = processTeemDropImport(json, products);
-        if (Object.keys(result.byDate).length===0) {
-          setError('V souboru se nepodařilo najít žádné objednávky s platným datem.');
+        const result = processTeemDropImport(json, products, importedOrderIds);
+        if (Object.keys(result.byDate).length===0 && result.newOrderIds.length===0) {
+          setError('V souboru se nepodařilo najít žádné objednávky s platným datem, nebo jsou všechny už dříve importované.');
           return;
         }
         setPreview(result);
@@ -354,6 +385,12 @@ function ImportPanel({products, onApply, onClose}){
 
   const dateRows = preview ? Object.entries(preview.byDate).sort((a,b)=>a[0].localeCompare(b[0])) : [];
   const productById = {}; products.forEach(p=>{ productById[p.id]=p; });
+  const priceCorrections = preview ? Object.entries(preview.avgUnitPrices).map(([pid,avgUsd])=>{
+    const p = productById[pid];
+    if (!p) return null;
+    const newKc = avgUsd*toNum(rate);
+    return { name: p.name, oldKc: toNum(p.fulfillCost), newKc };
+  }).filter(Boolean) : [];
 
   return (<div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
@@ -370,8 +407,16 @@ function ImportPanel({products, onApply, onClose}){
 
     {preview && (<div style={{marginTop:4}}>
       <div style={{fontSize:13,color:T.textMuted,fontFamily:fontBody,marginBottom:10}}>
-        Nalezeno {preview.orderCount} objednávek napříč {dateRows.length} dny.
+        Nových objednávek: {preview.newOrderIds.length}{preview.skippedCount>0 ? (' · už dříve importováno: '+preview.skippedCount+' (přeskočeno)') : ''} · dní v přehledu: {dateRows.length}
       </div>
+      {priceCorrections.length>0 && (
+        <div style={{background:T.surfaceAlt,border:'1px solid '+T.borderSoft,borderRadius:8,padding:'10px 12px',marginBottom:12,fontSize:13,fontFamily:fontBody}}>
+          <div style={{color:T.textFaint,fontSize:11,letterSpacing:'0.06em',textTransform:'uppercase',marginBottom:6}}>Oprava nákladů za kus podle reálných dat</div>
+          {priceCorrections.map(c=>(
+            <div key={c.name} style={{color:T.textMuted}}>{c.name}: {fmtKc(c.oldKc)} → <span style={{color:T.paprika,fontWeight:600}}>{fmtKc(c.newKc)}</span></div>
+          ))}
+        </div>
+      )}
       <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:8,marginBottom:10}}>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr style={{background:T.surfaceAlt}}>
@@ -384,9 +429,9 @@ function ImportPanel({products, onApply, onClose}){
               <tr key={date}>
                 <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,fontFamily:fontMono,fontSize:13}}>{date}</td>
                 <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,fontFamily:fontBody,fontSize:13,color:T.textMuted}}>
-                  {Object.entries(agg.units).map(([pid,qty])=> (productById[pid]?productById[pid].name:'?')+': '+qty).join(', ')}
+                  {Object.keys(agg.units).length>0 ? Object.entries(agg.units).map(([pid,qty])=> (productById[pid]?productById[pid].name:'?')+': '+qty).join(', ') : '—'}
                 </td>
-                <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13}}>{fmtKc(agg.shippingUsd*toNum(rate))}</td>
+                <td style={{padding:'8px 10px',borderTop:'1px solid '+T.borderSoft,textAlign:'right',fontFamily:fontMono,fontSize:13}}>{agg.shippingUsd>0 ? fmtKc(Math.round(agg.shippingUsd*toNum(rate)*100)/100) : '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -398,7 +443,7 @@ function ImportPanel({products, onApply, onClose}){
         </div>
       )}
       <div style={{display:'flex',gap:10}}>
-        <button onClick={()=>onApply(preview.byDate, toNum(rate))} style={{background:T.meta,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Potvrdit import ({dateRows.length} {dateRows.length===1?'den':'dní'})</button>
+        <button onClick={()=>onApply(preview.byDate, toNum(rate), preview.avgUnitPrices, preview.newOrderIds)} style={{background:T.meta,border:'none',borderRadius:8,color:'#12141A',fontFamily:fontDisplay,fontWeight:600,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Potvrdit import ({dateRows.length} {dateRows.length===1?'den':'dní'})</button>
         <button onClick={onClose} style={{background:'transparent',border:'1px solid '+T.border,borderRadius:8,color:T.textMuted,fontFamily:fontBody,fontSize:13,padding:'9px 16px',cursor:'pointer'}}>Zrušit</button>
       </div>
     </div>)}
@@ -447,17 +492,19 @@ function MetaTab({data, setData}){
   const [showPeriod, setShowPeriod] = useState(false);
   const [showImport, setShowImport] = useState(false);
 
-  const applyImport = (byDate, rate) => {
+  const round2 = (n) => Math.round(n*100)/100;
+
+  const applyImport = (byDate, rate, avgUnitPrices, newOrderIds) => {
     setData(d=>{
       let newRows = [...d.rows];
       Object.entries(byDate).forEach(([date, agg])=>{
-        const shippingKc = agg.shippingUsd * rate;
+        const shippingKc = round2(agg.shippingUsd * rate);
         const idx = newRows.findIndex(r=>r.date===date);
         if (idx>=0) {
           const existing = newRows[idx];
           const mergedUnits = {...(existing.units||{})};
           Object.entries(agg.units).forEach(([pid,qty])=>{ mergedUnits[pid] = toNum(mergedUnits[pid]) + qty; });
-          newRows[idx] = {...existing, units: mergedUnits, shipping: String(toNum(existing.shipping) + shippingKc)};
+          newRows[idx] = {...existing, units: mergedUnits, shipping: String(round2(toNum(existing.shipping) + shippingKc))};
         } else {
           const units = {};
           d.settings.products.forEach(p=>{ units[p.id] = String(agg.units[p.id]||0); });
@@ -465,7 +512,17 @@ function MetaTab({data, setData}){
         }
       });
       newRows.sort((a,b)=>a.date.localeCompare(b.date));
-      return {...d, rows: newRows};
+
+      const correctedProducts = d.settings.products.map(p=>{
+        const avgUsd = avgUnitPrices ? avgUnitPrices[p.id] : undefined;
+        if (avgUsd) return {...p, fulfillCost: String(round2(avgUsd*rate))};
+        return p;
+      });
+
+      const prevIds = d.settings.importedOrderIds || [];
+      const updatedIds = [...prevIds, ...(newOrderIds||[])];
+
+      return {...d, rows: newRows, settings: {...d.settings, products: correctedProducts, importedOrderIds: updatedIds}};
     });
     setShowImport(false);
   };
@@ -528,7 +585,7 @@ function MetaTab({data, setData}){
     </div>
     {showChart && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><ProfitChart rows={computedRows} fmt={fmtKc} /></div>}
     {showPeriod && <div style={{background:T.surface,border:'1px solid '+T.border,borderRadius:10,padding:'16px 18px',marginBottom:18}}><PeriodSummary rows={computedRows} fmt={fmtKc} /></div>}
-    {showImport && <ImportPanel products={products} onApply={applyImport} onClose={()=>setShowImport(false)} />}
+    {showImport && <ImportPanel products={products} importedOrderIds={settings.importedOrderIds || []} onApply={applyImport} onClose={()=>setShowImport(false)} />}
 
     <div style={{overflowX:'auto',border:'1px solid '+T.border,borderRadius:10}}>
       <table style={{width:'100%',borderCollapse:'collapse',minWidth:680+products.length*90,tableLayout:'fixed'}}>
